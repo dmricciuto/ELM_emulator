@@ -1,0 +1,4401 @@
+{
+  "patch_index": -1,
+  "sample_count": 18228216,
+  "dropped_nonfinite": 0,
+  "bad_feature_columns": [],
+  "bad_target_columns": [],
+  "train_metrics": {
+    "rmse_mean": 2.4540581680096816,
+    "rmse_max": 10.77816537835925,
+    "mae_mean": 1.492334575653648,
+    "r2_mean": 0.9914660004244432,
+    "rmse_by_target": {
+      "fpsn_patch": 0.41184852304203345,
+      "eflx_sh_tot": 8.476351585620446,
+      "qflx_tran_veg": 9.032793923268469e-07,
+      "qflx_evap_canopy": 1.0080308452828168e-06,
+      "qflx_ev_soil": 1.1920675571907348e-06,
+      "qflx_ev_snow": 1.0784877466709637e-06,
+      "qflx_ev_h2osfc": 1.6316882091038959e-06,
+      "t_veg": 1.4997922680597746,
+      "t_ref2m": 1.5310060239449825,
+      "hs_soil": 8.709345709108774,
+      "hs_top_snow": 8.080175914787707,
+      "hs_h2osfc": 10.77816537835925,
+      "dhsdT": 1.285819114919484,
+      "laisun_patch": 0.009275737690106454,
+      "laisha_patch": 0.011546941133982214,
+      "psnsun_patch": 0.684207960352727,
+      "psnsha_patch": 0.24144788559156874
+    },
+    "mae_by_target": {
+      "fpsn_patch": 0.23030408731071947,
+      "eflx_sh_tot": 5.2182966772307795,
+      "qflx_tran_veg": 4.215825502444761e-07,
+      "qflx_evap_canopy": 3.825710034992099e-07,
+      "qflx_ev_soil": 5.973810459558946e-07,
+      "qflx_ev_snow": 5.435959158881074e-07,
+      "qflx_ev_h2osfc": 6.900252454599297e-07,
+      "t_veg": 1.0225264259903803,
+      "t_ref2m": 0.9975788637573059,
+      "hs_soil": 5.544245922987037,
+      "hs_top_snow": 5.083738319066936,
+      "hs_h2osfc": 6.025900520397712,
+      "dhsdT": 0.8819154600225878,
+      "laisun_patch": 0.005444369646537564,
+      "laisha_patch": 0.006786623373960014,
+      "psnsun_patch": 0.2549285874939256,
+      "psnsha_patch": 0.09801929367837313
+    },
+    "r2_by_target": {
+      "fpsn_patch": 0.9973293687905821,
+      "eflx_sh_tot": 0.9964002159215347,
+      "qflx_tran_veg": 0.9970173695459436,
+      "qflx_evap_canopy": 0.9902458046109278,
+      "qflx_ev_soil": 0.9890567917749776,
+      "qflx_ev_snow": 0.986106592367156,
+      "qflx_ev_h2osfc": 0.9815258584989102,
+      "t_veg": 0.9919836404067803,
+      "t_ref2m": 0.9905796151379215,
+      "hs_soil": 0.993995959049256,
+      "hs_top_snow": 0.9900547514528246,
+      "hs_h2osfc": 0.9909732606235265,
+      "dhsdT": 0.9832427092721296,
+      "laisun_patch": 0.9994099334771172,
+      "laisha_patch": 0.9998950146809842,
+      "psnsun_patch": 0.9881002079137677,
+      "psnsha_patch": 0.9890049136911986
+    },
+    "zero_fraction_by_target": {
+      "fpsn_patch": 0.044699299470281124,
+      "eflx_sh_tot": 0.0,
+      "qflx_tran_veg": 0.28585777153616626,
+      "qflx_evap_canopy": 0.6519923990460674,
+      "qflx_ev_soil": 0.020073998360744118,
+      "qflx_ev_snow": 0.023013530331943432,
+      "qflx_ev_h2osfc": 0.0031456327907649667,
+      "t_veg": 0.0,
+      "t_ref2m": 0.0,
+      "hs_soil": 0.0,
+      "hs_top_snow": 0.0,
+      "hs_h2osfc": 0.0,
+      "dhsdT": 0.0,
+      "laisun_patch": 0.5435376216006946,
+      "laisha_patch": 0.1149208619222092,
+      "psnsun_patch": 0.05189734415755392,
+      "psnsha_patch": 0.04470154444946536
+    },
+    "valid_count_by_target": {
+      "fpsn_patch": 6236138,
+      "eflx_sh_tot": 14449239,
+      "qflx_tran_veg": 12788720,
+      "qflx_evap_canopy": 14449239,
+      "qflx_ev_soil": 14449239,
+      "qflx_ev_snow": 14449239,
+      "qflx_ev_h2osfc": 14449239,
+      "t_veg": 14449239,
+      "t_ref2m": 14449239,
+      "hs_soil": 14449239,
+      "hs_top_snow": 14449239,
+      "hs_h2osfc": 14449239,
+      "dhsdT": 14449239,
+      "laisun_patch": 14449239,
+      "laisha_patch": 14449239,
+      "psnsun_patch": 6236138,
+      "psnsha_patch": 6236138
+    },
+    "rmse_per_target": [
+      0.41184852304203345,
+      8.476351585620446,
+      9.032793923268469e-07,
+      1.0080308452828168e-06,
+      1.1920675571907348e-06,
+      1.0784877466709637e-06,
+      1.6316882091038959e-06,
+      1.4997922680597746,
+      1.5310060239449825,
+      8.709345709108774,
+      8.080175914787707,
+      10.77816537835925,
+      1.285819114919484,
+      0.009275737690106454,
+      0.011546941133982214,
+      0.684207960352727,
+      0.24144788559156874
+    ],
+    "mae_per_target": [
+      0.23030408731071947,
+      5.2182966772307795,
+      4.215825502444761e-07,
+      3.825710034992099e-07,
+      5.973810459558946e-07,
+      5.435959158881074e-07,
+      6.900252454599297e-07,
+      1.0225264259903803,
+      0.9975788637573059,
+      5.544245922987037,
+      5.083738319066936,
+      6.025900520397712,
+      0.8819154600225878,
+      0.005444369646537564,
+      0.006786623373960014,
+      0.2549285874939256,
+      0.09801929367837313
+    ],
+    "r2_per_target": [
+      0.9973293687905821,
+      0.9964002159215347,
+      0.9970173695459436,
+      0.9902458046109278,
+      0.9890567917749776,
+      0.986106592367156,
+      0.9815258584989102,
+      0.9919836404067803,
+      0.9905796151379215,
+      0.993995959049256,
+      0.9900547514528246,
+      0.9909732606235265,
+      0.9832427092721296,
+      0.9994099334771172,
+      0.9998950146809842,
+      0.9881002079137677,
+      0.9890049136911986
+    ],
+    "zero_fraction_per_target": [
+      0.044699299470281124,
+      0.0,
+      0.28585777153616626,
+      0.6519923990460674,
+      0.020073998360744118,
+      0.023013530331943432,
+      0.0031456327907649667,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.5435376216006946,
+      0.1149208619222092,
+      0.05189734415755392,
+      0.04470154444946536
+    ],
+    "valid_count_per_target": [
+      6236138,
+      14449239,
+      12788720,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      14449239,
+      6236138,
+      6236138
+    ]
+  },
+  "val_metrics": {
+    "rmse_mean": 2.477665955612387,
+    "rmse_max": 11.025244247245052,
+    "mae_mean": 1.4956199090197135,
+    "r2_mean": 0.9912877251054548,
+    "rmse_by_target": {
+      "fpsn_patch": 0.413107684255142,
+      "eflx_sh_tot": 8.485254017182454,
+      "qflx_tran_veg": 9.039252744486225e-07,
+      "qflx_evap_canopy": 1.0131493608441257e-06,
+      "qflx_ev_soil": 1.200663131268221e-06,
+      "qflx_ev_snow": 1.0902964683532357e-06,
+      "qflx_ev_h2osfc": 1.675611543519628e-06,
+      "t_veg": 1.5026920648897695,
+      "t_ref2m": 1.53535054608398,
+      "hs_soil": 8.765553504928983,
+      "hs_top_snow": 8.14666527660027,
+      "hs_h2osfc": 11.025244247245052,
+      "dhsdT": 1.288362891298857,
+      "laisun_patch": 0.009276890253860803,
+      "laisha_patch": 0.011562206469128634,
+      "psnsun_patch": 0.6904767486690355,
+      "psnsha_patch": 0.24676928388827166
+    },
+    "mae_by_target": {
+      "fpsn_patch": 0.2308181375873782,
+      "eflx_sh_tot": 5.219389173112988,
+      "qflx_tran_veg": 4.2125154627579884e-07,
+      "qflx_evap_canopy": 3.8272700557867526e-07,
+      "qflx_ev_soil": 5.997213807769529e-07,
+      "qflx_ev_snow": 5.454610939560927e-07,
+      "qflx_ev_h2osfc": 6.93566869403594e-07,
+      "t_veg": 1.0237487263956906,
+      "t_ref2m": 0.999280047470101,
+      "hs_soil": 5.55920317585633,
+      "hs_top_snow": 5.09688412176574,
+      "hs_h2osfc": 6.045784886461037,
+      "dhsdT": 0.8834613158998577,
+      "laisun_patch": 0.005444161331267534,
+      "laisha_patch": 0.0067928935898520955,
+      "psnsun_patch": 0.25621517217966205,
+      "psnsha_patch": 0.0985139989573307
+    },
+    "r2_by_target": {
+      "fpsn_patch": 0.9973185752455076,
+      "eflx_sh_tot": 0.9963851980501401,
+      "qflx_tran_veg": 0.997020502350965,
+      "qflx_evap_canopy": 0.9901662010961015,
+      "qflx_ev_soil": 0.988902318016784,
+      "qflx_ev_snow": 0.9858194489369627,
+      "qflx_ev_h2osfc": 0.9805389235896558,
+      "t_veg": 0.9919370563244784,
+      "t_ref2m": 0.9905060645992926,
+      "hs_soil": 0.993912816619521,
+      "hs_top_snow": 0.9898845152791077,
+      "hs_h2osfc": 0.9905575601335922,
+      "dhsdT": 0.9831340946938834,
+      "laisun_patch": 0.9994099029035041,
+      "laisha_patch": 0.9998948385173917,
+      "psnsun_patch": 0.9879412531576941,
+      "psnsha_patch": 0.9885620572781497
+    },
+    "zero_fraction_by_target": {
+      "fpsn_patch": 0.04466938727343509,
+      "eflx_sh_tot": 0.0,
+      "qflx_tran_veg": 0.2859561988819358,
+      "qflx_evap_canopy": 0.6516308543925783,
+      "qflx_ev_soil": 0.02007912390662039,
+      "qflx_ev_snow": 0.023004676510232098,
+      "qflx_ev_h2osfc": 0.0031223796192407683,
+      "t_veg": 0.0,
+      "t_ref2m": 0.0,
+      "hs_soil": 0.0,
+      "hs_top_snow": 0.0,
+      "hs_h2osfc": 0.0,
+      "dhsdT": 0.0,
+      "laisun_patch": 0.5434623671452249,
+      "laisha_patch": 0.1149336892275827,
+      "psnsun_patch": 0.051843528553864746,
+      "psnsha_patch": 0.04467195267349961
+    },
+    "valid_count_by_target": {
+      "fpsn_patch": 1559211,
+      "eflx_sh_tot": 3612309,
+      "qflx_tran_veg": 3197133,
+      "qflx_evap_canopy": 3612309,
+      "qflx_ev_soil": 3612309,
+      "qflx_ev_snow": 3612309,
+      "qflx_ev_h2osfc": 3612309,
+      "t_veg": 3612309,
+      "t_ref2m": 3612309,
+      "hs_soil": 3612309,
+      "hs_top_snow": 3612309,
+      "hs_h2osfc": 3612309,
+      "dhsdT": 3612309,
+      "laisun_patch": 3612309,
+      "laisha_patch": 3612309,
+      "psnsun_patch": 1559211,
+      "psnsha_patch": 1559211
+    },
+    "rmse_per_target": [
+      0.413107684255142,
+      8.485254017182454,
+      9.039252744486225e-07,
+      1.0131493608441257e-06,
+      1.200663131268221e-06,
+      1.0902964683532357e-06,
+      1.675611543519628e-06,
+      1.5026920648897695,
+      1.53535054608398,
+      8.765553504928983,
+      8.14666527660027,
+      11.025244247245052,
+      1.288362891298857,
+      0.009276890253860803,
+      0.011562206469128634,
+      0.6904767486690355,
+      0.24676928388827166
+    ],
+    "mae_per_target": [
+      0.2308181375873782,
+      5.219389173112988,
+      4.2125154627579884e-07,
+      3.8272700557867526e-07,
+      5.997213807769529e-07,
+      5.454610939560927e-07,
+      6.93566869403594e-07,
+      1.0237487263956906,
+      0.999280047470101,
+      5.55920317585633,
+      5.09688412176574,
+      6.045784886461037,
+      0.8834613158998577,
+      0.005444161331267534,
+      0.0067928935898520955,
+      0.25621517217966205,
+      0.0985139989573307
+    ],
+    "r2_per_target": [
+      0.9973185752455076,
+      0.9963851980501401,
+      0.997020502350965,
+      0.9901662010961015,
+      0.988902318016784,
+      0.9858194489369627,
+      0.9805389235896558,
+      0.9919370563244784,
+      0.9905060645992926,
+      0.993912816619521,
+      0.9898845152791077,
+      0.9905575601335922,
+      0.9831340946938834,
+      0.9994099029035041,
+      0.9998948385173917,
+      0.9879412531576941,
+      0.9885620572781497
+    ],
+    "zero_fraction_per_target": [
+      0.04466938727343509,
+      0.0,
+      0.2859561988819358,
+      0.6516308543925783,
+      0.02007912390662039,
+      0.023004676510232098,
+      0.0031223796192407683,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.5434623671452249,
+      0.1149336892275827,
+      0.051843528553864746,
+      0.04467195267349961
+    ],
+    "valid_count_per_target": [
+      1559211,
+      3612309,
+      3197133,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      3612309,
+      1559211,
+      1559211
+    ],
+    "target_names": [
+      "fpsn_patch",
+      "eflx_sh_tot",
+      "qflx_tran_veg",
+      "qflx_evap_canopy",
+      "qflx_ev_soil",
+      "qflx_ev_snow",
+      "qflx_ev_h2osfc",
+      "t_veg",
+      "t_ref2m",
+      "hs_soil",
+      "hs_top_snow",
+      "hs_h2osfc",
+      "dhsdT",
+      "laisun_patch",
+      "laisha_patch",
+      "psnsun_patch",
+      "psnsha_patch"
+    ],
+    "feature_importance_by_target": {
+      "psnsun_patch": [
+        {
+          "name": "slatop",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 5.333295566365565,
+          "rmse_increase": 4.670528769328268,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 4.181958648271452,
+          "rmse_increase": 3.519191851234155,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 3.8299540076880305,
+          "rmse_increase": 3.167187210650733,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 3.592716171597,
+          "rmse_increase": 2.9299493745597025,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.897115429083019,
+          "rmse_increase": 2.2343486320457213,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.718873756040533,
+          "rmse_increase": 2.0561069590032357,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.5784203828940764,
+          "rmse_increase": 1.915653585856779,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.92411101481178,
+          "rmse_increase": 1.2613442177744827,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.9180324600224248,
+          "rmse_increase": 1.2552656629851273,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.8030638414469207,
+          "rmse_increase": 1.1402970444096234,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.7427957424165867,
+          "rmse_increase": 1.0800289453792895,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.6643049912764818,
+          "rmse_increase": 1.0015381942391843,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.655597471689744,
+          "rmse_increase": 0.9928306746524466,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.5156605566077226,
+          "rmse_increase": 0.8528937595704252,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.4215421898952743,
+          "rmse_increase": 0.7587753928579769,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.4161416752554121,
+          "rmse_increase": 0.7533748782181148,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.3459824650498637,
+          "rmse_increase": 0.6832156680125664,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.2515687577780434,
+          "rmse_increase": 0.5888019607407461,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.0490155761380562,
+          "rmse_increase": 0.38624877910075883,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.0442827575032743,
+          "rmse_increase": 0.3815159604659769,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.0206895759324908,
+          "rmse_increase": 0.3579227788951934,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.999174293621494,
+          "rmse_increase": 0.33640749658419666,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9796158944178944,
+          "rmse_increase": 0.3168490973805971,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9659510471191536,
+          "rmse_increase": 0.30318425008185623,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9582165228683263,
+          "rmse_increase": 0.2954497258310289,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9344883609388992,
+          "rmse_increase": 0.27172156390160185,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9257350645146506,
+          "rmse_increase": 0.26296826747735325,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9209719326382213,
+          "rmse_increase": 0.25820513560092395,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9054227172719325,
+          "rmse_increase": 0.24265592023463511,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.8759611023292995,
+          "rmse_increase": 0.21319430529200212,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.8058061815686052,
+          "rmse_increase": 0.14303938453130782,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.795781384390205,
+          "rmse_increase": 0.1330145873529076,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7853951010865515,
+          "rmse_increase": 0.12262830404925418,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7772089457145036,
+          "rmse_increase": 0.11444214867720626,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7764130341330696,
+          "rmse_increase": 0.11364623709577226,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7465231652363379,
+          "rmse_increase": 0.08375636819904053,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7379092071861436,
+          "rmse_increase": 0.07514241014884626,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7339598181620474,
+          "rmse_increase": 0.07119302112475001,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7273416456692855,
+          "rmse_increase": 0.06457484863198815,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7163360571045209,
+          "rmse_increase": 0.05356926006722351,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6936607944995931,
+          "rmse_increase": 0.030893997462295708,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6922841024492273,
+          "rmse_increase": 0.029517305411929984,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.672906136327107,
+          "rmse_increase": 0.010139339289809701,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6647650199731587,
+          "rmse_increase": 0.0019982229358613823,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6639433781320502,
+          "rmse_increase": 0.0011765810947528266,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6627667970372974,
+          "rmse_increase": 0.0,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6625955532609928,
+          "rmse_increase": -0.00017124377630450827,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6622383084623079,
+          "rmse_increase": -0.0005284885749894386,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        }
+      ],
+      "psnsha_patch": [
+        {
+          "name": "slatop",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.5303123607561422,
+          "rmse_increase": 1.3101041006904597,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.4682004240767645,
+          "rmse_increase": 1.247992164011082,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.2763802185250934,
+          "rmse_increase": 1.056171958459411,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.244889213918104,
+          "rmse_increase": 1.0246809538524215,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.0073938814582015,
+          "rmse_increase": 0.787185621392519,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.8971365074511045,
+          "rmse_increase": 0.676928247385422,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.8559876136008752,
+          "rmse_increase": 0.6357793535351927,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.8383507437865882,
+          "rmse_increase": 0.6181424837209057,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.6992401981658654,
+          "rmse_increase": 0.47903193810018285,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.6201419499006816,
+          "rmse_increase": 0.3999336898349991,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.6048809818840577,
+          "rmse_increase": 0.3846727218183752,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5931686117945004,
+          "rmse_increase": 0.3729603517288179,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.552369601067531,
+          "rmse_increase": 0.33216134100184846,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5342991535611988,
+          "rmse_increase": 0.31409089349551633,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.509613782002806,
+          "rmse_increase": 0.28940552193712354,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.47288915937448134,
+          "rmse_increase": 0.2526808993087988,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.4276347731069663,
+          "rmse_increase": 0.20742651304128376,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.42704821294948936,
+          "rmse_increase": 0.20683995288380683,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.41242053274544305,
+          "rmse_increase": 0.19221227267976052,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3559498190624547,
+          "rmse_increase": 0.13574155899677218,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.35038097638376353,
+          "rmse_increase": 0.130172716318081,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.34767006835490033,
+          "rmse_increase": 0.1274618082892178,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3330547513100763,
+          "rmse_increase": 0.11284649124439375,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.31857636393373473,
+          "rmse_increase": 0.0983681038680522,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.31519959884463716,
+          "rmse_increase": 0.09499133877895463,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3124120859342982,
+          "rmse_increase": 0.09220382586861567,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.30663416514288017,
+          "rmse_increase": 0.08642590507719763,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3007550315938205,
+          "rmse_increase": 0.08054677152813797,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2969854604889743,
+          "rmse_increase": 0.07677720042329175,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.273802097483003,
+          "rmse_increase": 0.05359383741732046,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.26865483484964403,
+          "rmse_increase": 0.0484465747839615,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.26210453998258054,
+          "rmse_increase": 0.04189627991689801,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.25374362534801265,
+          "rmse_increase": 0.033535365282330115,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2534503550486696,
+          "rmse_increase": 0.03324209498298705,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24969861426030832,
+          "rmse_increase": 0.029490354194625784,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2447033191319144,
+          "rmse_increase": 0.024495059066231867,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24428762094334677,
+          "rmse_increase": 0.02407936087766424,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24320589374203103,
+          "rmse_increase": 0.022997633676348495,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24225025846186324,
+          "rmse_increase": 0.022041998396180706,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24133992126708476,
+          "rmse_increase": 0.021131661201402224,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2380059068230575,
+          "rmse_increase": 0.01779764675737497,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22953380840044096,
+          "rmse_increase": 0.009325548334758432,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2224970620080962,
+          "rmse_increase": 0.002288801942413682,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22020826006568253,
+          "rmse_increase": 0.0,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22012883725396404,
+          "rmse_increase": -7.942281171849364e-05,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2199795663292659,
+          "rmse_increase": -0.00022869373641662416,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.21937600383893968,
+          "rmse_increase": -0.0008322562267428502,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.21447514555638192,
+          "rmse_increase": -0.005733114509300613,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        }
+      ]
+    },
+    "feature_sensitivity_by_target": {
+      "fpsn_patch": [
+        {
+          "name": "slatop",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 5.4860184606241855,
+          "rmse_increase": 5.084937080803302,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 4.342163346907652,
+          "rmse_increase": 3.9410819670867685,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 4.2762479403812526,
+          "rmse_increase": 3.875166560560369,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 4.240377428207407,
+          "rmse_increase": 3.8392960483865233,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 3.9914173787837153,
+          "rmse_increase": 3.590335998962832,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 3.171329106242106,
+          "rmse_increase": 2.770247726421222,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 2.880251464463409,
+          "rmse_increase": 2.4791700846425258,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 2.7272184855226858,
+          "rmse_increase": 2.326137105701802,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.9081595187841516,
+          "rmse_increase": 1.5070781389632681,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.6222460195411477,
+          "rmse_increase": 1.2211646397202642,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.5329187493028331,
+          "rmse_increase": 1.1318373694819497,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.4733200460736542,
+          "rmse_increase": 1.0722386662527708,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.3838122761067042,
+          "rmse_increase": 0.9827308962858208,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.3462140693223923,
+          "rmse_increase": 0.9451326895015089,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.333928988115504,
+          "rmse_increase": 0.9328476082946207,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.2008969536978271,
+          "rmse_increase": 0.7998155738769437,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.1492413699709432,
+          "rmse_increase": 0.7481599901500597,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 1.0523858661986407,
+          "rmse_increase": 0.6513044863777573,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.8511835442552407,
+          "rmse_increase": 0.45010216443435724,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.8407653768781924,
+          "rmse_increase": 0.439683997057309,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.7794915315596057,
+          "rmse_increase": 0.3784101517387223,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.7334585014132688,
+          "rmse_increase": 0.3323771215923854,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.714757486857953,
+          "rmse_increase": 0.3136761070370696,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.7127272779739386,
+          "rmse_increase": 0.3116458981530552,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.705795802529991,
+          "rmse_increase": 0.30471442270910754,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.6985167842758645,
+          "rmse_increase": 0.29743540445498107,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.6673378196484571,
+          "rmse_increase": 0.26625643982757363,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.6290690475090627,
+          "rmse_increase": 0.22798766768817924,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.6168572560913791,
+          "rmse_increase": 0.21577587627049566,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5860519714734728,
+          "rmse_increase": 0.18497059165258933,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5717463920209614,
+          "rmse_increase": 0.17066501220007801,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5712666986707802,
+          "rmse_increase": 0.17018531884989674,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5525894911658237,
+          "rmse_increase": 0.15150811134494024,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5437564043986576,
+          "rmse_increase": 0.14267502457777415,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5289099062013463,
+          "rmse_increase": 0.12782852638046283,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5136796202437613,
+          "rmse_increase": 0.11259824042287792,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.5000272430096993,
+          "rmse_increase": 0.09894586318881582,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.48104559047175954,
+          "rmse_increase": 0.07996421065087611,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.4563304244111481,
+          "rmse_increase": 0.05524904459026464,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.4447286336176596,
+          "rmse_increase": 0.04364725379677614,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.43866619803549856,
+          "rmse_increase": 0.03758481821461512,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.4307176251992548,
+          "rmse_increase": 0.029636245378371395,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.4199013511656725,
+          "rmse_increase": 0.018819971344789077,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.4140821970441273,
+          "rmse_increase": 0.013000817223243866,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.40628694447880576,
+          "rmse_increase": 0.005205564657922324,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.40108137982088343,
+          "rmse_increase": 0.0,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.4002863021576682,
+          "rmse_increase": -0.0007950776632152379,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 0.40108137982088343,
+          "permuted_rmse": 0.3997330498606433,
+          "rmse_increase": -0.0013483299602401466,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 71.09327922418119
+        }
+      ],
+      "psnsun_patch": [
+        {
+          "name": "slatop",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 5.406484020702207,
+          "rmse_increase": 4.74371722366491,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 4.059146333091408,
+          "rmse_increase": 3.3963795360541105,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 3.9316755431197166,
+          "rmse_increase": 3.268908746082419,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 3.7154972495385876,
+          "rmse_increase": 3.05273045250129,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.831405243209187,
+          "rmse_increase": 2.1686384461718897,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.7723840144894347,
+          "rmse_increase": 2.1096172174521373,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.615689524226319,
+          "rmse_increase": 1.9529227271890215,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.175193496915633,
+          "rmse_increase": 1.5124266998783353,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.0420167038481973,
+          "rmse_increase": 1.3792499068108999,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 2.0091779289929383,
+          "rmse_increase": 1.3464111319556409,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.9373614989813663,
+          "rmse_increase": 1.274594701944069,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.885146801624159,
+          "rmse_increase": 1.2223800045868618,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.6961155656598164,
+          "rmse_increase": 1.0333487686225191,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.5589590383021683,
+          "rmse_increase": 0.896192241264871,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.5411306110733118,
+          "rmse_increase": 0.8783638140360145,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.480834982601762,
+          "rmse_increase": 0.8180681855644646,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.349551089959948,
+          "rmse_increase": 0.6867842929226508,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.1464263094701137,
+          "rmse_increase": 0.48365951243281635,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.116369380249206,
+          "rmse_increase": 0.4536025832119087,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.097430026368707,
+          "rmse_increase": 0.43466322933140955,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.0708230305044155,
+          "rmse_increase": 0.40805623346711817,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.050378531659936,
+          "rmse_increase": 0.38761173462263876,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 1.0431996239277663,
+          "rmse_increase": 0.380432826890469,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9837982889247359,
+          "rmse_increase": 0.3210314918874385,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9708466161391541,
+          "rmse_increase": 0.3080798191018568,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9228520834822569,
+          "rmse_increase": 0.26008528644495954,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.914649366907112,
+          "rmse_increase": 0.2518825698698146,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.9140725481134342,
+          "rmse_increase": 0.25130575107613684,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.8983563407789306,
+          "rmse_increase": 0.2355895437416332,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.8306345074380512,
+          "rmse_increase": 0.16786771040075388,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.808700309484349,
+          "rmse_increase": 0.14593351244705166,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.8048864189439409,
+          "rmse_increase": 0.1421196219066435,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.8025249627312903,
+          "rmse_increase": 0.1397581656939929,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7721533714037656,
+          "rmse_increase": 0.10938657436646826,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7293949750971847,
+          "rmse_increase": 0.0666281780598873,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7270025962220659,
+          "rmse_increase": 0.06423579918476852,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7268678859193924,
+          "rmse_increase": 0.06410108888209509,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7261333653720125,
+          "rmse_increase": 0.0633665683347151,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7199091639797693,
+          "rmse_increase": 0.05714236694247199,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.710479201447295,
+          "rmse_increase": 0.04771240440999769,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.7040528902700273,
+          "rmse_increase": 0.041286093232729915,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6892616329249629,
+          "rmse_increase": 0.026494835887665547,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6809974757352835,
+          "rmse_increase": 0.018230678697986114,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.669302874075615,
+          "rmse_increase": 0.0065360770383176,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6656143571745546,
+          "rmse_increase": 0.002847560137257288,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.663820320528958,
+          "rmse_increase": 0.0010535234916606573,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6627667970372974,
+          "rmse_increase": 0.0,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 0.6627667970372974,
+          "permuted_rmse": 0.6614782901916533,
+          "rmse_increase": -0.0012885068456440774,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 67.41991629753991
+        }
+      ],
+      "psnsha_patch": [
+        {
+          "name": "slatop",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.6181635232926168,
+          "rmse_increase": 1.3979552632269343,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.4257721003420016,
+          "rmse_increase": 1.2055638402763191,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.2898954157642741,
+          "rmse_increase": 1.0696871556985916,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 1.2522014872344136,
+          "rmse_increase": 1.031993227168731,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.9784655234945042,
+          "rmse_increase": 0.7582572634288217,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.904150220914971,
+          "rmse_increase": 0.6839419608492885,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.8924658986544991,
+          "rmse_increase": 0.6722576385888166,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.8378299796166385,
+          "rmse_increase": 0.617621719550956,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.6237793735076985,
+          "rmse_increase": 0.403571113442016,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.591298626770916,
+          "rmse_increase": 0.37109036670523354,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5599525097841204,
+          "rmse_increase": 0.33974424971843786,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5585644098788343,
+          "rmse_increase": 0.33835614981315176,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5581723287256666,
+          "rmse_increase": 0.3379640686599841,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5263313005134451,
+          "rmse_increase": 0.3061230404477626,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5135656186795411,
+          "rmse_increase": 0.2933573586138586,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.5040239821040523,
+          "rmse_increase": 0.2838157220383698,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.4549110894364698,
+          "rmse_increase": 0.23470282937078726,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.44305563113977814,
+          "rmse_increase": 0.2228473710740956,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.4262941251258365,
+          "rmse_increase": 0.20608586506015394,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3475314656438591,
+          "rmse_increase": 0.12732320557817658,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3414049237328822,
+          "rmse_increase": 0.1211966636671997,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3294693951190587,
+          "rmse_increase": 0.10926113505337617,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3280873567828598,
+          "rmse_increase": 0.10787909671717724,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3213203855535583,
+          "rmse_increase": 0.10111212548787576,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.31997714606368527,
+          "rmse_increase": 0.09976888599800274,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.31308957536138377,
+          "rmse_increase": 0.09288131529570123,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.3009745067840827,
+          "rmse_increase": 0.08076624671840019,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.298682025772131,
+          "rmse_increase": 0.07847376570644846,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.29343972065374613,
+          "rmse_increase": 0.0732314605880636,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.28602544682517456,
+          "rmse_increase": 0.06581718675949202,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.27426298945844274,
+          "rmse_increase": 0.05405472939276021,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.27284011769108407,
+          "rmse_increase": 0.05263185762540154,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.27057075360912963,
+          "rmse_increase": 0.0503624935434471,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.26712816596036915,
+          "rmse_increase": 0.046919905894686614,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.25195994873790317,
+          "rmse_increase": 0.03175168867222064,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24711074507384279,
+          "rmse_increase": 0.026902485008160254,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2467517167404267,
+          "rmse_increase": 0.02654345667474417,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24567289803546652,
+          "rmse_increase": 0.025464637969783988,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24338144434884462,
+          "rmse_increase": 0.02317318428316209,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.24291095687357236,
+          "rmse_increase": 0.022702696807889833,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.2351253370215902,
+          "rmse_increase": 0.01491707695590766,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.23021186362260168,
+          "rmse_increase": 0.01000360355691915,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22699512196112454,
+          "rmse_increase": 0.0067868618954420035,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22435708475503047,
+          "rmse_increase": 0.004148824689347935,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22137976426405218,
+          "rmse_increase": 0.001171504198369644,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.22020826006568253,
+          "rmse_increase": 0.0,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.21998612467058937,
+          "rmse_increase": -0.00022213539509316482,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 0.22020826006568253,
+          "permuted_rmse": 0.21944697686087142,
+          "rmse_increase": -0.000761283204811114,
+          "prediction_clip_min": 0.0,
+          "prediction_clip_max": 18.34083941852176
+        }
+      ],
+      "qflx_tran_veg": [
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.6274640377944063e-05,
+          "rmse_increase": 1.5555233383159138e-05,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 9.459468074154893e-06,
+          "rmse_increase": 8.740061079369967e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 8.722306065227633e-06,
+          "rmse_increase": 8.002899070442707e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 8.110430508072772e-06,
+          "rmse_increase": 7.3910235132878465e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "slatop",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.110051316919785e-06,
+          "rmse_increase": 6.390644322134859e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 6.758876139945104e-06,
+          "rmse_increase": 6.039469145160179e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 6.32518343322136e-06,
+          "rmse_increase": 5.605776438436435e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 5.928098970702678e-06,
+          "rmse_increase": 5.208691975917752e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 4.736372346769135e-06,
+          "rmse_increase": 4.016965351984209e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 4.338487361717102e-06,
+          "rmse_increase": 3.619080366932176e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 3.7776412549802733e-06,
+          "rmse_increase": 3.058234260195348e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 3.750790313343605e-06,
+          "rmse_increase": 3.0313833185586794e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 3.607968794546811e-06,
+          "rmse_increase": 2.8885617997618856e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 3.600782005713913e-06,
+          "rmse_increase": 2.8813750109289874e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 3.1054325305837853e-06,
+          "rmse_increase": 2.3860255357988597e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 3.0882900849908407e-06,
+          "rmse_increase": 2.368883090205915e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 2.9403566720338803e-06,
+          "rmse_increase": 2.2209496772489547e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 2.5812545049572475e-06,
+          "rmse_increase": 1.861847510172322e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 2.5090212381717743e-06,
+          "rmse_increase": 1.7896142433868487e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 2.0388832143069257e-06,
+          "rmse_increase": 1.3194762195220002e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.9346380562524167e-06,
+          "rmse_increase": 1.2152310614674912e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.8234953639787919e-06,
+          "rmse_increase": 1.1040883691938664e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.726169309961401e-06,
+          "rmse_increase": 1.0067623151764755e-06,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.5498814041336024e-06,
+          "rmse_increase": 8.304744093486768e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.5212782786555988e-06,
+          "rmse_increase": 8.018712838706732e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.460100106538599e-06,
+          "rmse_increase": 7.406931117536735e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.4178043523234212e-06,
+          "rmse_increase": 6.983973575384957e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.3227698061870213e-06,
+          "rmse_increase": 6.033628114020958e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.2750487756909486e-06,
+          "rmse_increase": 5.55641780906023e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.25458344608707e-06,
+          "rmse_increase": 5.351764513021445e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.227576239942598e-06,
+          "rmse_increase": 5.081692451576724e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.2223054009730507e-06,
+          "rmse_increase": 5.028984061881252e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.1994195850027381e-06,
+          "rmse_increase": 4.800125902178126e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.14993514071739e-06,
+          "rmse_increase": 4.3052814593246456e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.1185935221906974e-06,
+          "rmse_increase": 3.9918652740577184e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.043750694787306e-06,
+          "rmse_increase": 3.243437000023805e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 1.0174510986492955e-06,
+          "rmse_increase": 2.9804410386436996e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 9.573033871784258e-07,
+          "rmse_increase": 2.378963923935003e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 9.207032337415112e-07,
+          "rmse_increase": 2.0129623895658564e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 8.530350517163503e-07,
+          "rmse_increase": 1.3362805693142475e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 8.47934417121074e-07,
+          "rmse_increase": 1.2852742233614848e-07,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.928595688682955e-07,
+          "rmse_increase": 7.345257408336999e-08,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.639497692376493e-07,
+          "rmse_increase": 4.454277445272376e-08,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.586139215459172e-07,
+          "rmse_increase": 3.920692676099167e-08,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.357061297006257e-07,
+          "rmse_increase": 1.6299134915700203e-08,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.203828481111255e-07,
+          "rmse_increase": 9.758533261999495e-10,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.194069947849255e-07,
+          "rmse_increase": 0.0,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 7.194069947849255e-07,
+          "permuted_rmse": 7.163940074873518e-07,
+          "rmse_increase": -3.0129872975736935e-09,
+          "prediction_clip_min": -5.409055509510859e-05,
+          "prediction_clip_max": 0.00027045277547554296
+        }
+      ],
+      "qflx_ev_soil": [
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 4.6810037506529655e-05,
+          "rmse_increase": 4.570113103053905e-05,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 4.527750685804213e-05,
+          "rmse_increase": 4.416860038205152e-05,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.537979637058685e-05,
+          "rmse_increase": 1.4270889894596242e-05,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.4158005023722284e-05,
+          "rmse_increase": 1.3049098547731676e-05,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1370463989002257e-05,
+          "rmse_increase": 1.026155751301165e-05,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.0039491146166595e-05,
+          "rmse_increase": 8.930584670175988e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 9.454572409854557e-06,
+          "rmse_increase": 8.34566593386395e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 9.389552970627205e-06,
+          "rmse_increase": 8.280646494636598e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 8.400565089000914e-06,
+          "rmse_increase": 7.291658613010307e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 8.196841939901693e-06,
+          "rmse_increase": 7.087935463911086e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 7.958714541133772e-06,
+          "rmse_increase": 6.849808065143165e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 6.665560870116002e-06,
+          "rmse_increase": 5.556654394125395e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 5.692857407960581e-06,
+          "rmse_increase": 4.5839509319699735e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 5.51243759319422e-06,
+          "rmse_increase": 4.403531117203613e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 4.571821555478666e-06,
+          "rmse_increase": 3.462915079488059e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 3.6964466149110426e-06,
+          "rmse_increase": 2.5875401389204355e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 3.262579369959828e-06,
+          "rmse_increase": 2.153672893969221e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 3.2379702591674812e-06,
+          "rmse_increase": 2.129063783176874e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.899724638423512e-06,
+          "rmse_increase": 1.7908181624329049e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.8662022009137915e-06,
+          "rmse_increase": 1.7572957249231844e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.8107294132592568e-06,
+          "rmse_increase": 1.7018229372686497e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.552317513847225e-06,
+          "rmse_increase": 1.4434110378566177e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.2166805137312777e-06,
+          "rmse_increase": 1.1077740377406705e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.172868219414567e-06,
+          "rmse_increase": 1.06396174342396e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.1679746428272924e-06,
+          "rmse_increase": 1.0590681668366853e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 2.151906782467882e-06,
+          "rmse_increase": 1.0430003064772748e-06,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.7303731056876361e-06,
+          "rmse_increase": 6.21466629697029e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.514051242699751e-06,
+          "rmse_increase": 4.0514476670914394e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.4908713400474624e-06,
+          "rmse_increase": 3.819648640568553e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.4820812021208176e-06,
+          "rmse_increase": 3.7317472613021045e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.4695229682057146e-06,
+          "rmse_increase": 3.606164922151075e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.4335492964722886e-06,
+          "rmse_increase": 3.246428204816815e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.4245581323578895e-06,
+          "rmse_increase": 3.1565165636728235e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.3809225654587655e-06,
+          "rmse_increase": 2.720160894681584e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.3762906328424007e-06,
+          "rmse_increase": 2.673841568517936e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.3232897774770127e-06,
+          "rmse_increase": 2.143833014864056e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.2629829284114807e-06,
+          "rmse_increase": 1.5407645242087358e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.2368102725073407e-06,
+          "rmse_increase": 1.279037965167336e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.2348179929469026e-06,
+          "rmse_increase": 1.2591151695629553e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "slatop",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.2249732675240987e-06,
+          "rmse_increase": 1.1606679153349159e-07,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1970818429036115e-06,
+          "rmse_increase": 8.817536691300438e-08,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.189765171974342e-06,
+          "rmse_increase": 8.085869598373488e-08,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1437159178578752e-06,
+          "rmse_increase": 3.480944186726805e-08,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1265350556186616e-06,
+          "rmse_increase": 1.7628579628054456e-08,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.121510961208224e-06,
+          "rmse_increase": 1.260448521761691e-08,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1214560265716112e-06,
+          "rmse_increase": 1.254955058100409e-08,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1131965030490764e-06,
+          "rmse_increase": 4.290027058469241e-09,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 1.1089064759906071e-06,
+          "permuted_rmse": 1.1106529284595833e-06,
+          "rmse_increase": 1.7464524689761691e-09,
+          "prediction_clip_min": -0.00011461999042867966,
+          "prediction_clip_max": 0.0003067223374262299
+        }
+      ],
+      "eflx_sh_tot": [
+        {
+          "name": "forc_swrad",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 168.94706883702466,
+          "rmse_increase": 160.77222622121818,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_t",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 86.98527327543064,
+          "rmse_increase": 78.81043065962415,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "t_grnd",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 67.28020144827201,
+          "rmse_increase": 59.10535883246552,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_lwrad",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 61.26419214535977,
+          "rmse_increase": 53.08934952955328,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "soilbeta_col",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 53.19573638766518,
+          "rmse_increase": 45.02089377185869,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_vpd",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 40.3312248526476,
+          "rmse_increase": 32.15638223684111,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "smp_l_lev1",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 39.923634141231304,
+          "rmse_increase": 31.748791525424814,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_q",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 35.61321470223833,
+          "rmse_increase": 27.43837208643184,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "t_h2osfc",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 31.676400456535458,
+          "rmse_increase": 23.501557840728964,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_rho",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 31.028904717544666,
+          "rmse_increase": 22.854062101738172,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "t_soisno_lev1",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 29.866194230437152,
+          "rmse_increase": 21.691351614630662,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "elai_patch",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 29.481726263900633,
+          "rmse_increase": 21.306883648094143,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "sabg_snow",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 29.477627398751252,
+          "rmse_increase": 21.302784782944762,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "wind_speed",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 28.636061505734087,
+          "rmse_increase": 20.461218889927594,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "htop_patch",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 27.60608377232145,
+          "rmse_increase": 19.431241156514957,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "frac_sno",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 27.271831546600282,
+          "rmse_increase": 19.096988930793792,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_pbot",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 27.123241322182466,
+          "rmse_increase": 18.948398706375976,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "h2ocan",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 24.98315313918774,
+          "rmse_increase": 16.808310523381245,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "t10",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 22.87620808786189,
+          "rmse_increase": 14.701365472055398,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "btran",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 22.64712984716497,
+          "rmse_increase": 14.472287231358477,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "h2osoi_liqvol_lev1",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 22.455998049216518,
+          "rmse_increase": 14.281155433410026,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "coszen_col",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 22.2998630704355,
+          "rmse_increase": 14.125020454629007,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "snow_depth",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 19.144996770265735,
+          "rmse_increase": 10.970154154459243,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "z0mr",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 17.1619272001143,
+          "rmse_increase": 8.987084584307807,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "mbbopt",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 16.450167719323073,
+          "rmse_increase": 8.27532510351658,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "slatop",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 16.39626753394313,
+          "rmse_increase": 8.22142491813664,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "max_dayl",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 15.809336934528284,
+          "rmse_increase": 7.634494318721792,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "esai_patch",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 14.806544067836263,
+          "rmse_increase": 6.6317014520297715,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "flnr",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 14.42768645628455,
+          "rmse_increase": 6.252843840478057,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "dayl",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 12.967683966992324,
+          "rmse_increase": 4.792841351185832,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "soil_color",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 12.904554161873525,
+          "rmse_increase": 4.729711546067033,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "zwt_col",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 12.261966142929236,
+          "rmse_increase": 4.087123527122744,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "rholnir",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 11.185985929361875,
+          "rmse_increase": 3.011143313555383,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "tausvis",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 10.503439090876254,
+          "rmse_increase": 2.3285964750697623,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "rhosnir",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 10.338637099168109,
+          "rmse_increase": 2.1637944833616167,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "tausnir",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 10.143858800517656,
+          "rmse_increase": 1.9690161847111636,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "rhosvis",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 10.126502866941685,
+          "rmse_increase": 1.951660251135193,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "frac_veg_nosno_patch",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 9.662408129545929,
+          "rmse_increase": 1.4875655137394368,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_pco2",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 9.195116004218379,
+          "rmse_increase": 1.020273388411887,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "xl",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 9.102761411918696,
+          "rmse_increase": 0.9279187961122037,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "taulnir",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.886382204142585,
+          "rmse_increase": 0.7115395883360929,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "rholvis",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.85591268449243,
+          "rmse_increase": 0.6810700686859388,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "frac_h2osfc",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.84765934209106,
+          "rmse_increase": 0.6728167262845677,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "leafcn",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.84078976814118,
+          "rmse_increase": 0.665947152334688,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_rain",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.475348309320111,
+          "rmse_increase": 0.3005056935136192,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "forc_snow",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.471092438348075,
+          "rmse_increase": 0.29624982254158283,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "smpsc",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.187713232671246,
+          "rmse_increase": 0.012870616864754325,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        },
+        {
+          "name": "smpso",
+          "baseline_rmse": 8.174842615806492,
+          "permuted_rmse": 8.167590546944282,
+          "rmse_increase": -0.007252068862209526,
+          "prediction_clip_min": -492.51713351958347,
+          "prediction_clip_max": 1111.925082845899
+        }
+      ]
+    }
+  },
+  "holdout_metrics": {
+    "rmse_mean": 4.242166941827603,
+    "rmse_max": 20.127612303083676,
+    "mae_mean": 2.115625764281133,
+    "r2_mean": 0.9771807768295747,
+    "rmse_by_target": {
+      "fpsn_patch": 0.3461651161502091,
+      "eflx_sh_tot": 10.406029676272613,
+      "qflx_tran_veg": 8.416646913432289e-07,
+      "qflx_evap_canopy": 1.2338335406903986e-06,
+      "qflx_ev_soil": 1.2660436121072594e-06,
+      "qflx_ev_snow": 1.3002071094791745e-06,
+      "qflx_ev_h2osfc": 2.393944517568978e-06,
+      "t_veg": 1.5551294312278265,
+      "t_ref2m": 1.7314055197287537,
+      "hs_soil": 17.015392901909323,
+      "hs_top_snow": 16.877608672770815,
+      "hs_h2osfc": 20.127612303083676,
+      "dhsdT": 3.094086936449213,
+      "laisun_patch": 0.008221515790422072,
+      "laisha_patch": 0.013594534948081261,
+      "psnsun_patch": 0.7687417606750396,
+      "psnsha_patch": 0.17284260636981325
+    },
+    "mae_by_target": {
+      "fpsn_patch": 0.1999510187473463,
+      "eflx_sh_tot": 6.4697487643740565,
+      "qflx_tran_veg": 4.148403781309852e-07,
+      "qflx_evap_canopy": 3.539661472656594e-07,
+      "qflx_ev_soil": 5.583201204791545e-07,
+      "qflx_ev_snow": 5.562157366020546e-07,
+      "qflx_ev_h2osfc": 8.756799412990097e-07,
+      "t_veg": 1.0437638162895626,
+      "t_ref2m": 1.0729404524887503,
+      "hs_soil": 8.015060082971177,
+      "hs_top_snow": 7.820048585558809,
+      "hs_h2osfc": 9.441806598359062,
+      "dhsdT": 1.5678600020270512,
+      "laisun_patch": 0.005007062673368241,
+      "laisha_patch": 0.007396686794489498,
+      "psnsun_patch": 0.24427540122033622,
+      "psnsha_patch": 0.07777676225293331
+    },
+    "r2_by_target": {
+      "fpsn_patch": 0.9984816072626813,
+      "eflx_sh_tot": 0.9951959785385273,
+      "qflx_tran_veg": 0.9981937351839059,
+      "qflx_evap_canopy": 0.9833197990235221,
+      "qflx_ev_soil": 0.9760895208406298,
+      "qflx_ev_snow": 0.9747816876497865,
+      "qflx_ev_h2osfc": 0.9355944516887823,
+      "t_veg": 0.9876770043937959,
+      "t_ref2m": 0.980999928704832,
+      "hs_soil": 0.970921566009917,
+      "hs_top_snow": 0.9713905916588284,
+      "hs_h2osfc": 0.9620828842607639,
+      "dhsdT": 0.8962277725404412,
+      "laisun_patch": 0.9995813284148503,
+      "laisha_patch": 0.9998816894826854,
+      "psnsun_patch": 0.9869505938387356,
+      "psnsha_patch": 0.9947030666100892
+    },
+    "zero_fraction_by_target": {
+      "fpsn_patch": 0.040642842577487764,
+      "eflx_sh_tot": 0.0,
+      "qflx_tran_veg": 0.21879480793902348,
+      "qflx_evap_canopy": 0.6855065159478724,
+      "qflx_ev_soil": 0.0625374997000024,
+      "qflx_ev_snow": 0.0625374997000024,
+      "qflx_ev_h2osfc": 0.0040979672162622695,
+      "t_veg": 0.0,
+      "t_ref2m": 0.0,
+      "hs_soil": 0.0,
+      "hs_top_snow": 0.0,
+      "hs_h2osfc": 0.0,
+      "dhsdT": 0.0,
+      "laisun_patch": 0.5185398516811865,
+      "laisha_patch": 0.04593563251493988,
+      "psnsun_patch": 0.05732565252854813,
+      "psnsha_patch": 0.040642842577487764
+    },
+    "valid_count_by_target": {
+      "fpsn_patch": 78464,
+      "eflx_sh_tot": 166668,
+      "qflx_tran_veg": 159012,
+      "qflx_evap_canopy": 166668,
+      "qflx_ev_soil": 166668,
+      "qflx_ev_snow": 166668,
+      "qflx_ev_h2osfc": 166668,
+      "t_veg": 166668,
+      "t_ref2m": 166668,
+      "hs_soil": 166668,
+      "hs_top_snow": 166668,
+      "hs_h2osfc": 166668,
+      "dhsdT": 166668,
+      "laisun_patch": 166668,
+      "laisha_patch": 166668,
+      "psnsun_patch": 78464,
+      "psnsha_patch": 78464
+    },
+    "rmse_per_target": [
+      0.3461651161502091,
+      10.406029676272613,
+      8.416646913432289e-07,
+      1.2338335406903986e-06,
+      1.2660436121072594e-06,
+      1.3002071094791745e-06,
+      2.393944517568978e-06,
+      1.5551294312278265,
+      1.7314055197287537,
+      17.015392901909323,
+      16.877608672770815,
+      20.127612303083676,
+      3.094086936449213,
+      0.008221515790422072,
+      0.013594534948081261,
+      0.7687417606750396,
+      0.17284260636981325
+    ],
+    "mae_per_target": [
+      0.1999510187473463,
+      6.4697487643740565,
+      4.148403781309852e-07,
+      3.539661472656594e-07,
+      5.583201204791545e-07,
+      5.562157366020546e-07,
+      8.756799412990097e-07,
+      1.0437638162895626,
+      1.0729404524887503,
+      8.015060082971177,
+      7.820048585558809,
+      9.441806598359062,
+      1.5678600020270512,
+      0.005007062673368241,
+      0.007396686794489498,
+      0.24427540122033622,
+      0.07777676225293331
+    ],
+    "r2_per_target": [
+      0.9984816072626813,
+      0.9951959785385273,
+      0.9981937351839059,
+      0.9833197990235221,
+      0.9760895208406298,
+      0.9747816876497865,
+      0.9355944516887823,
+      0.9876770043937959,
+      0.980999928704832,
+      0.970921566009917,
+      0.9713905916588284,
+      0.9620828842607639,
+      0.8962277725404412,
+      0.9995813284148503,
+      0.9998816894826854,
+      0.9869505938387356,
+      0.9947030666100892
+    ],
+    "zero_fraction_per_target": [
+      0.040642842577487764,
+      0.0,
+      0.21879480793902348,
+      0.6855065159478724,
+      0.0625374997000024,
+      0.0625374997000024,
+      0.0040979672162622695,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.5185398516811865,
+      0.04593563251493988,
+      0.05732565252854813,
+      0.040642842577487764
+    ],
+    "valid_count_per_target": [
+      78464,
+      166668,
+      159012,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      166668,
+      78464,
+      78464
+    ],
+    "target_names": [
+      "fpsn_patch",
+      "eflx_sh_tot",
+      "qflx_tran_veg",
+      "qflx_evap_canopy",
+      "qflx_ev_soil",
+      "qflx_ev_snow",
+      "qflx_ev_h2osfc",
+      "t_veg",
+      "t_ref2m",
+      "hs_soil",
+      "hs_top_snow",
+      "hs_h2osfc",
+      "dhsdT",
+      "laisun_patch",
+      "laisha_patch",
+      "psnsun_patch",
+      "psnsha_patch"
+    ]
+  },
+  "holdout_gridcell_index": [
+    1,
+    100,
+    200
+  ],
+  "holdout_sample_count": 166668,
+  "train_range": {
+    "nstep_first": 87588,
+    "nstep_last": 96359,
+    "date_first": [
+      1989,
+      12,
+      31,
+      43200
+    ],
+    "date_last": [
+      1990,
+      12,
+      31,
+      82800
+    ]
+  },
+  "val_range": {
+    "nstep_first": 87589,
+    "nstep_last": 96355,
+    "date_first": [
+      1989,
+      12,
+      31,
+      46800
+    ],
+    "date_last": [
+      1990,
+      12,
+      31,
+      68400
+    ]
+  },
+  "holdout_range": {
+    "nstep_first": 87588,
+    "nstep_last": 96359,
+    "date_first": [
+      1989,
+      12,
+      31,
+      43200
+    ],
+    "date_last": [
+      1990,
+      12,
+      31,
+      82800
+    ]
+  },
+  "training_history": {
+    "train_loss": [
+      0.3112755684831024,
+      0.09563953520485718,
+      0.07497272232538973,
+      0.06421201369341682,
+      0.057451904089742115,
+      0.05269162363596092,
+      0.04882440092337077,
+      0.04560110256143285,
+      0.04269570139198821,
+      0.04012915235838739,
+      0.03790908053989324,
+      0.036158320051512566,
+      0.03486552605262169,
+      0.03361172913426188,
+      0.03252337097582234,
+      0.031562134151545046,
+      0.03078300596901734,
+      0.029993335585788365,
+      0.029295625729798193,
+      0.02869567612177646,
+      0.028018368854781622,
+      0.027692421529088084,
+      0.02708711020007932,
+      0.0266421671906208,
+      0.026164814357843874,
+      0.025707661296447477,
+      0.025322301355422353,
+      0.025031568777507247,
+      0.02456045798047096,
+      0.0242616407472084,
+      0.023888674257028158,
+      0.023551021765799544,
+      0.02333549784319433,
+      0.022980122544646802,
+      0.022655370548300073,
+      0.02236828652981719,
+      0.022149146412292757,
+      0.021974818199468414,
+      0.021561400383306305,
+      0.02131489283358889,
+      0.021256414473865906,
+      0.020956896009488343,
+      0.020744725050429954,
+      0.020569154040306403,
+      0.020297684820529023,
+      0.02019176008474773,
+      0.01999072683342981,
+      0.01968838186825023,
+      0.01969443187454707,
+      0.01939519174498131,
+      0.01929931079640108,
+      0.01919997979073503,
+      0.01896491849044869,
+      0.018845165477079505,
+      0.01868592344258166,
+      0.018446820893438694,
+      0.018354131085840285,
+      0.018250294939964606,
+      0.018080503153045793,
+      0.017984242460846362,
+      0.017879462350008174,
+      0.017679462605472065,
+      0.017535853709570424,
+      0.01743810317095588,
+      0.01730467075675861,
+      0.017140872877647435,
+      0.017069122909960165,
+      0.016886024992929863,
+      0.016800581599792204,
+      0.01671768529382766,
+      0.016611021568332864,
+      0.016520393380212568,
+      0.01640929247998544,
+      0.01628855450660395,
+      0.016265417116260096,
+      0.0159908689524793,
+      0.016070140432987816,
+      0.015934065995712624,
+      0.015753013515903937,
+      0.015698920547692483,
+      0.015698558065146882,
+      0.015506326882547923,
+      0.015508726171778339,
+      0.015427218303421504,
+      0.015291344526126913,
+      0.01526792556451996,
+      0.01508483196275806,
+      0.015108360963709214,
+      0.015072772945214181,
+      0.014897676614614634,
+      0.014840301884784957,
+      0.014810714247000164,
+      0.014695194511931407,
+      0.014644870930667377,
+      0.014585463709421287,
+      0.014621517776903523,
+      0.014417604083928587,
+      0.014392711458163024,
+      0.014322478307318363,
+      0.014273278853472541,
+      0.014182375566991746,
+      0.014173720217398388,
+      0.014057431285737327,
+      0.014081687409413885,
+      0.014029922528504246,
+      0.013952161391935737,
+      0.013930222567389993,
+      0.013823735767899595,
+      0.013764912186704609,
+      0.013703727074877709,
+      0.013736642863416025,
+      0.013627241100121408,
+      0.013552439158858218,
+      0.013513630871319663,
+      0.013434569760145645,
+      0.013468365863437566,
+      0.013406938017763164,
+      0.013384644262391518,
+      0.013324577883897324,
+      0.013284645468940563,
+      0.013263127383063822,
+      0.013146323855646055,
+      0.013171313574950619,
+      0.013127782226148235,
+      0.013079243008367616,
+      0.01299122124236094,
+      0.013008881478288055,
+      0.012942167428823618,
+      0.012909775945395906,
+      0.012855571859023151,
+      0.01284624548519359,
+      0.012887850066655361,
+      0.012737077825209674,
+      0.01273063728712263,
+      0.012767815482023074,
+      0.012695770997267503,
+      0.01261310987343076,
+      0.012647352607002086,
+      0.012563287942118235,
+      0.012494773346913885,
+      0.012582896521727963,
+      0.012486799809727734,
+      0.0124663529892313,
+      0.01249076122611896,
+      0.012378882498762726,
+      0.012314640019274405,
+      0.012362378754766819,
+      0.01234280577612139,
+      0.012314260275655202,
+      0.012270901537588818,
+      0.012294787627000075,
+      0.01220847686491401,
+      0.012209725056298717,
+      0.012092870824477252,
+      0.012107793022604549,
+      0.012037568502296689,
+      0.012119762498329129,
+      0.012056369047898512,
+      0.012026323991663316,
+      0.012055663501515108,
+      0.011932229564200699,
+      0.012044154680692233,
+      0.011915230643155887,
+      0.011919829640453218,
+      0.011919826404001918,
+      0.011838503013369184,
+      0.011853984038754286,
+      0.011834213636579556,
+      0.011845630757948932,
+      0.01180282329542065,
+      0.011728448565729063,
+      0.011701371335335987,
+      0.011734711098994604,
+      0.011651143768793858,
+      0.011632677656493036,
+      0.011667427434101364,
+      0.011635499842026654,
+      0.01165469415586998,
+      0.011639048071468578,
+      0.011594301974611584,
+      0.011537650052238913,
+      0.011505658809955303,
+      0.011590081642116357,
+      0.011455453898572275,
+      0.011526026876803437,
+      0.011440165981448074,
+      0.011405059115379644,
+      0.011426335546225984,
+      0.0114440950333263,
+      0.01140749724202566,
+      0.01136467467605798,
+      0.011390060321238247,
+      0.011325357186848222,
+      0.011325768216163325,
+      0.011387396721818328,
+      0.011266117182252634,
+      0.011314319809098049,
+      0.011250003970046928,
+      0.011209294806778161,
+      0.011275311940395993,
+      0.011282061020173638,
+      0.011185085072236903,
+      0.011164397675527167,
+      0.011221372164212741,
+      0.01115258031301369,
+      0.011159546235028435,
+      0.011044172140268179,
+      0.011169164968292098,
+      0.011075921727521388,
+      0.011106385364791386,
+      0.011111768662120422,
+      0.011088140409996066,
+      0.011031592054064997,
+      0.011081724684702325,
+      0.010983754067399383,
+      0.011046682547659895,
+      0.01099261115579044,
+      0.01095881073723012,
+      0.011028746134555178,
+      0.010931683881250442,
+      0.010950583678025465,
+      0.010901765046615946,
+      0.010961357824403236,
+      0.010906208694250874,
+      0.010910136667312,
+      0.010821793413809521,
+      0.010917903071614951,
+      0.010895008415118602,
+      0.010772015713998096,
+      0.010811635271995855,
+      0.010879245818470398,
+      0.010818116805132698,
+      0.010768712376037874,
+      0.010751633622527661,
+      0.010771706093490393,
+      0.010736515079688163,
+      0.010788714723889105,
+      0.010756555186137894,
+      0.010682306678047008,
+      0.010643581459425153,
+      0.010735865631793958,
+      0.010716606588924633,
+      0.010663095103130082,
+      0.010660959045272068,
+      0.010651972498829008,
+      0.010596730590406047,
+      0.010655366457425632,
+      0.010594365823322831,
+      0.010622365442336414,
+      0.010584313405584965,
+      0.010591360238882212,
+      0.010556403328390682,
+      0.010554395649767569,
+      0.010598319687994358,
+      0.010505339678596048,
+      0.010559188834142901,
+      0.01051178453195149,
+      0.010483555124895605,
+      0.010505363412572247,
+      0.01049051349519065,
+      0.010524545859427473,
+      0.0104981925153085,
+      0.010447516160852769,
+      0.010487861762758833,
+      0.010446909865642565,
+      0.010424633371344518,
+      0.010466855036187496,
+      0.010396642382867735,
+      0.010434133434727181,
+      0.010369224246271055,
+      0.010334482020382427,
+      0.010408430617319513,
+      0.010345329526323,
+      0.01038661262028897,
+      0.010365510957812832,
+      0.010358781296742987,
+      0.010252868427949794,
+      0.010287248171292819,
+      0.010279625249664168,
+      0.010349263972286724,
+      0.010283497124236094,
+      0.010295277806968171,
+      0.010261319881111248,
+      0.010309207493363462,
+      0.010253342028656697,
+      0.01023708641259379,
+      0.010227118142589725,
+      0.01023703570819009,
+      0.010204550367674677,
+      0.010190243095294383,
+      0.01018540567941795,
+      0.010189679952768179,
+      0.010162489446579602
+    ],
+    "val_loss": [
+      0.11628998070955276,
+      0.08261949568986893,
+      0.06951989233493805,
+      0.06090985983610153,
+      0.055663615465164185,
+      0.051236122846603394,
+      0.04840172827243805,
+      0.04448290541768074,
+      0.04174485430121422,
+      0.03977891802787781,
+      0.03775622695684433,
+      0.03554997220635414,
+      0.034676335752010345,
+      0.03305814415216446,
+      0.03259698674082756,
+      0.03132794052362442,
+      0.03053227998316288,
+      0.029378244653344154,
+      0.02962077036499977,
+      0.028943046927452087,
+      0.028264600783586502,
+      0.02768860198557377,
+      0.027808960527181625,
+      0.027427172288298607,
+      0.026138192042708397,
+      0.02632918581366539,
+      0.02581258863210678,
+      0.024879643693566322,
+      0.0243950467556715,
+      0.02433626912534237,
+      0.024621307849884033,
+      0.02353052608668804,
+      0.023407289758324623,
+      0.023345215246081352,
+      0.02258611097931862,
+      0.023208435624837875,
+      0.021982595324516296,
+      0.02180280163884163,
+      0.021857379004359245,
+      0.021906966343522072,
+      0.021931836381554604,
+      0.02098057232797146,
+      0.02072542905807495,
+      0.02056298591196537,
+      0.02027120441198349,
+      0.020638320595026016,
+      0.021113678812980652,
+      0.019773025065660477,
+      0.019683141261339188,
+      0.019690435379743576,
+      0.01936962828040123,
+      0.019138872623443604,
+      0.019538890570402145,
+      0.018880952149629593,
+      0.018454842269420624,
+      0.019498787820339203,
+      0.018439674749970436,
+      0.01823798567056656,
+      0.018316073343157768,
+      0.01791284792125225,
+      0.018029073253273964,
+      0.01764066517353058,
+      0.01776900514960289,
+      0.017393941059708595,
+      0.01755519211292267,
+      0.01724272035062313,
+      0.01769748516380787,
+      0.017025653272867203,
+      0.016905177384614944,
+      0.01711062528192997,
+      0.016852596774697304,
+      0.016720322892069817,
+      0.016727564856410027,
+      0.016481414437294006,
+      0.016178688034415245,
+      0.016164476051926613,
+      0.016046350821852684,
+      0.016077321022748947,
+      0.01621699333190918,
+      0.01572868973016739,
+      0.01633346453309059,
+      0.015968941152095795,
+      0.016177166253328323,
+      0.01569773629307747,
+      0.015933958813548088,
+      0.01561396848410368,
+      0.015469997189939022,
+      0.015218546614050865,
+      0.015603136271238327,
+      0.015082396566867828,
+      0.01478655356913805,
+      0.01492718979716301,
+      0.014751539565622807,
+      0.014719462022185326,
+      0.014751889742910862,
+      0.014595367014408112,
+      0.014932221733033657,
+      0.01458813901990652,
+      0.01477306429296732,
+      0.01417545136064291,
+      0.014479056932032108,
+      0.014152713119983673,
+      0.014129796996712685,
+      0.01430052425712347,
+      0.014537051320075989,
+      0.014366871677339077,
+      0.013913151808083057,
+      0.014226164668798447,
+      0.013578900136053562,
+      0.013919347897171974,
+      0.014082024805247784,
+      0.0138823501765728,
+      0.01378616038709879,
+      0.013577948324382305,
+      0.01369566936045885,
+      0.014005939476191998,
+      0.013368623331189156,
+      0.013509842567145824,
+      0.013787699863314629,
+      0.013434727676212788,
+      0.013417855836451054,
+      0.013454080559313297,
+      0.013601760379970074,
+      0.013335506431758404,
+      0.013123060576617718,
+      0.013236508704721928,
+      0.013805784285068512,
+      0.013362188823521137,
+      0.013115649111568928,
+      0.013133126311004162,
+      0.013548135757446289,
+      0.012926431372761726,
+      0.013323540799319744,
+      0.012790577486157417,
+      0.013027923181653023,
+      0.012744840234518051,
+      0.012979649007320404,
+      0.012503528036177158,
+      0.012702422216534615,
+      0.012660128995776176,
+      0.01257641427218914,
+      0.012590009719133377,
+      0.012782564386725426,
+      0.012363262474536896,
+      0.012810004875063896,
+      0.012912197038531303,
+      0.012522406876087189,
+      0.012392775155603886,
+      0.012393459677696228,
+      0.012438487261533737,
+      0.012625886127352715,
+      0.012219276279211044,
+      0.012462220154702663,
+      0.012288050726056099,
+      0.012212958186864853,
+      0.012269527651369572,
+      0.012250030413269997,
+      0.011998489499092102,
+      0.012090019881725311,
+      0.011999716982245445,
+      0.012321975082159042,
+      0.012290649116039276,
+      0.013474232517182827,
+      0.011900224722921848,
+      0.012082393281161785,
+      0.01210950780659914,
+      0.012178568169474602,
+      0.01209974568337202,
+      0.011786600574851036,
+      0.01219165325164795,
+      0.012126872316002846,
+      0.012083005160093307,
+      0.01208121981471777,
+      0.012055348604917526,
+      0.011795909143984318,
+      0.012550038285553455,
+      0.012914875522255898,
+      0.011811207048594952,
+      0.012555275112390518,
+      0.011941686272621155,
+      0.011700459755957127,
+      0.011581766419112682,
+      0.011485045775771141,
+      0.011445681564509869,
+      0.012053703889250755,
+      0.011660177260637283,
+      0.011840198189020157,
+      0.011427292600274086,
+      0.011965101584792137,
+      0.011228594928979874,
+      0.011780278757214546,
+      0.011364797130227089,
+      0.011545811779797077,
+      0.011657989583909512,
+      0.011517800390720367,
+      0.011414001695811749,
+      0.011367576196789742,
+      0.011297459714114666,
+      0.011589841917157173,
+      0.01162512507289648,
+      0.011577297933399677,
+      0.011424542404711246,
+      0.011539608240127563,
+      0.01215920690447092,
+      0.011646122671663761,
+      0.011657433584332466,
+      0.011107726953923702,
+      0.011272379197180271,
+      0.011236162856221199,
+      0.011173528619110584,
+      0.011046094819903374,
+      0.011368838138878345,
+      0.011002953164279461,
+      0.011331487447023392,
+      0.011001022532582283,
+      0.011197736486792564,
+      0.01131218858063221,
+      0.011457223445177078,
+      0.01109912246465683,
+      0.011130099184811115,
+      0.01089651882648468,
+      0.011129208840429783,
+      0.010871187783777714,
+      0.011063404381275177,
+      0.011303418315947056,
+      0.01095052994787693,
+      0.01113249734044075,
+      0.011100509203970432,
+      0.010834888555109501,
+      0.011108906008303165,
+      0.01126224733889103,
+      0.010924623347818851,
+      0.010850725695490837,
+      0.01103602722287178,
+      0.010842980816960335,
+      0.011580494232475758,
+      0.011284240521490574,
+      0.010740933939814568,
+      0.010954310186207294,
+      0.010717649012804031,
+      0.010723039507865906,
+      0.010626512579619884,
+      0.010792072862386703,
+      0.010683691129088402,
+      0.010931981727480888,
+      0.0108423363417387,
+      0.010689686052501202,
+      0.010628453455865383,
+      0.010699869133532047,
+      0.011394724249839783,
+      0.010463637299835682,
+      0.011176866479218006,
+      0.010835245251655579,
+      0.010616962797939777,
+      0.010486067272722721,
+      0.010621264576911926,
+      0.010828772559762001,
+      0.010468854568898678,
+      0.010885131545364857,
+      0.01067992951720953,
+      0.011060606688261032,
+      0.010685719549655914,
+      0.010876505635678768,
+      0.010801183991134167,
+      0.01070101372897625,
+      0.01067558117210865,
+      0.011149036698043346,
+      0.010374600067734718,
+      0.010455098934471607,
+      0.010970206931233406,
+      0.011122077703475952,
+      0.01055404357612133,
+      0.010279245674610138,
+      0.010326922871172428,
+      0.010469588451087475,
+      0.010583212599158287,
+      0.010484226979315281,
+      0.010291991755366325,
+      0.01072696316987276,
+      0.010481532663106918,
+      0.01029376219958067,
+      0.010806816630065441,
+      0.010449867695569992,
+      0.010428974404931068,
+      0.010462717153131962,
+      0.010835301131010056,
+      0.010439076460897923,
+      0.010321108624339104,
+      0.010444209910929203,
+      0.010280357673764229,
+      0.010468682274222374,
+      0.01043053437024355,
+      0.010557076893746853
+    ],
+    "best_val_loss": 0.010279245674610138
+  },
+  "log1p_target_names": [
+    "gh_canopy",
+    "psnsun_patch",
+    "psnsha_patch"
+  ],
+  "surfdata_file": "surface_data/surfdata_sg256.nc",
+  "surfdata_cell_stride": null,
+  "dropped_target_names": [
+    "qflx_prec_grnd"
+  ],
+  "patch_omitted_target_names": [],
+  "dropped_input_names": [
+    "forc_solad_vis",
+    "forc_solad_nir",
+    "forc_solai_vis",
+    "forc_solai_nir",
+    "forc_hgt_u_patch",
+    "z0mg_col",
+    "ugust",
+    "pft_type"
+  ],
+  "dropped_constant_input_names": [
+    "taulvis"
+  ],
+  "state_target_lag_steps": 1,
+  "state_target_names": [
+    "t_veg",
+    "t_ref2m"
+  ]
+}

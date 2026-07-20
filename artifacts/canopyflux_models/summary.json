@@ -1,0 +1,32 @@
+[
+  {
+    "patch_index": 14,
+    "sample_count": 1631592,
+    "raw_sample_count": 1631592,
+    "dropped_nonfinite": 0,
+    "bad_feature_columns": [],
+    "bad_target_columns": [],
+    "status": "trained",
+    "val_rmse_mean": 2.723111349307479,
+    "val_r2_mean": 0.9847341149276986,
+    "dropped_target_names": [
+      "qflx_prec_grnd"
+    ],
+    "patch_omitted_target_names": [],
+    "dropped_input_names": [
+      "forc_solad_vis",
+      "forc_solad_nir",
+      "forc_solai_vis",
+      "forc_solai_nir",
+      "forc_hgt_u_patch",
+      "z0mg_col",
+      "ugust",
+      "pft_type"
+    ],
+    "state_target_lag_steps": 1,
+    "state_target_names": [
+      "t_veg",
+      "t_ref2m"
+    ]
+  }
+]

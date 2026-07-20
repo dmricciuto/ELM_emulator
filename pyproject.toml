@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elm-emulator"
+version = "0.1.0"
+description = "ELM surface emulator training and replay tools"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+    "netCDF4",
+    "numpy",
+    "scikit-learn",
+    "torch",
+]
+
+[project.scripts]
+elm-emulator = "elm_emulator.cli:main"
+elm-replay = "elm_emulator.benchmark_replay:main"
+elm-train-patch-models = "elm_emulator.train_patch_models:main"
+elm-coupled-benchmark = "elm_emulator.coupled_surface_hydrology_soiltemp:main"
+elm-plot-regional-timeseries = "elm_emulator.plot_regional_timeseries:main"
+
+[tool.setuptools]
+packages = ["elm_emulator"]
