@@ -97,6 +97,12 @@ NONNEGATIVE_TARGET_NAMES = {
     "psnsun_patch",
     "psnsha_patch",
 }
+SIGNED_EVAPORATION_TARGET_NAMES = {
+    "qflx_evap_canopy",
+    "qflx_ev_soil",
+    "qflx_ev_snow",
+    "qflx_ev_h2osfc",
+}
 DEFAULT_LOG1P_TARGET_NAMES = ("gh_canopy", "psnsun_patch")
 RECOMMENDED_LOG1P_TARGET_NAMES = ("gh_canopy", "psnsun_patch", "psnsha_patch")
 ZERO_RADIATION_THRESHOLD = 1.0e-12
@@ -411,6 +417,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.25,
         help="Photosynthesis target value at or below which --psn-low-value-weight is applied.",
+    )
+    parser.add_argument(
+        "--negative-evap-weight",
+        type=float,
+        default=6.0,
+        help=(
+            "Extra per-target loss multiplier for dew/deposition samples where signed "
+            "evaporation targets are negative."
+        ),
+    )
+    parser.add_argument(
+        "--negative-evap-threshold",
+        type=float,
+        default=1.0e-12,
+        help=(
+            "Magnitude threshold for applying --negative-evap-weight to signed "
+            "evaporation targets, in kg m-2 s-1."
+        ),
     )
     parser.add_argument(
         "--hs-soil-weight",
@@ -1458,6 +1482,12 @@ def standardize_targets_with_mask(
     transformed_train_targets = np.array(train_targets, copy=True)
     transformed_val_targets = np.array(val_targets, copy=True)
     log1p_targets = set(log1p_target_names or DEFAULT_LOG1P_TARGET_NAMES)
+    signed_log1p_targets = sorted(log1p_targets.intersection(SIGNED_EVAPORATION_TARGET_NAMES))
+    if signed_log1p_targets:
+        raise ValueError(
+            "Signed evaporation targets cannot be trained in log1p space because "
+            f"negative dew/deposition values would be clipped: {signed_log1p_targets}"
+        )
 
     for idx, name in enumerate(target_names):
         if name in log1p_targets:
@@ -1486,6 +1516,10 @@ def compute_metrics(
     rmse_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
     mae_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
     zero_fraction_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
+    negative_fraction_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
+    pred_negative_fraction_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
+    target_min_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
+    pred_min_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
     r2_per_target = np.zeros(y_true.shape[1], dtype=np.float64)
     for idx in range(y_true.shape[1]):
         valid = valid_mask[:, idx]
@@ -1494,6 +1528,10 @@ def compute_metrics(
             rmse_per_target[idx] = float(np.sqrt(np.mean(diff ** 2)))
             mae_per_target[idx] = float(np.mean(np.abs(diff)))
             zero_fraction_per_target[idx] = float(np.mean(np.isclose(y_true[valid, idx], 0.0)))
+            negative_fraction_per_target[idx] = float(np.mean(y_true[valid, idx] < 0.0))
+            pred_negative_fraction_per_target[idx] = float(np.mean(y_pred[valid, idx] < 0.0))
+            target_min_per_target[idx] = float(np.min(y_true[valid, idx]))
+            pred_min_per_target[idx] = float(np.min(y_pred[valid, idx]))
             if np.count_nonzero(valid) > 1:
                 r2_per_target[idx] = float(r2_score(y_true[valid, idx], y_pred[valid, idx]))
             else:
@@ -1502,6 +1540,10 @@ def compute_metrics(
             rmse_per_target[idx] = np.nan
             mae_per_target[idx] = np.nan
             zero_fraction_per_target[idx] = np.nan
+            negative_fraction_per_target[idx] = np.nan
+            pred_negative_fraction_per_target[idx] = np.nan
+            target_min_per_target[idx] = np.nan
+            pred_min_per_target[idx] = np.nan
             r2_per_target[idx] = np.nan
     return {
         "rmse_mean": float(np.nanmean(rmse_per_target)),
@@ -1524,6 +1566,22 @@ def compute_metrics(
             name: float(value) if np.isfinite(value) else None
             for name, value in zip(target_names, zero_fraction_per_target)
         },
+        "negative_fraction_by_target": {
+            name: float(value) if np.isfinite(value) else None
+            for name, value in zip(target_names, negative_fraction_per_target)
+        },
+        "pred_negative_fraction_by_target": {
+            name: float(value) if np.isfinite(value) else None
+            for name, value in zip(target_names, pred_negative_fraction_per_target)
+        },
+        "target_min_by_target": {
+            name: float(value) if np.isfinite(value) else None
+            for name, value in zip(target_names, target_min_per_target)
+        },
+        "pred_min_by_target": {
+            name: float(value) if np.isfinite(value) else None
+            for name, value in zip(target_names, pred_min_per_target)
+        },
         "valid_count_by_target": {
             name: int(value)
             for name, value in zip(target_names, np.count_nonzero(valid_mask, axis=0))
@@ -1532,6 +1590,10 @@ def compute_metrics(
         "mae_per_target": mae_per_target.tolist(),
         "r2_per_target": r2_per_target.tolist(),
         "zero_fraction_per_target": zero_fraction_per_target.tolist(),
+        "negative_fraction_per_target": negative_fraction_per_target.tolist(),
+        "pred_negative_fraction_per_target": pred_negative_fraction_per_target.tolist(),
+        "target_min_per_target": target_min_per_target.tolist(),
+        "pred_min_per_target": pred_min_per_target.tolist(),
         "valid_count_per_target": np.count_nonzero(valid_mask, axis=0).tolist(),
     }
 
@@ -1719,16 +1781,25 @@ def compute_target_loss_weights(
     target_names: list[str],
     psn_low_value_weight: float,
     psn_low_value_threshold: float,
+    negative_evap_weight: float = 1.0,
+    negative_evap_threshold: float = 0.0,
 ) -> np.ndarray:
     weights = np.ones(y.shape, dtype=np.float64)
-    if psn_low_value_weight <= 1.0:
-        return weights
-    for target_name in PHOTOSYNTHESIS_TARGET_NAMES:
-        if target_name not in target_names:
-            continue
-        idx = target_names.index(target_name)
-        low_valid = valid_mask[:, idx] & (np.asarray(y[:, idx], dtype=np.float64) <= psn_low_value_threshold)
-        weights[low_valid, idx] *= psn_low_value_weight
+    if psn_low_value_weight > 1.0:
+        for target_name in PHOTOSYNTHESIS_TARGET_NAMES:
+            if target_name not in target_names:
+                continue
+            idx = target_names.index(target_name)
+            low_valid = valid_mask[:, idx] & (np.asarray(y[:, idx], dtype=np.float64) <= psn_low_value_threshold)
+            weights[low_valid, idx] *= psn_low_value_weight
+    if negative_evap_weight > 1.0:
+        threshold = max(float(negative_evap_threshold), 0.0)
+        for target_name in SIGNED_EVAPORATION_TARGET_NAMES:
+            if target_name not in target_names:
+                continue
+            idx = target_names.index(target_name)
+            dew_valid = valid_mask[:, idx] & (np.asarray(y[:, idx], dtype=np.float64) < -threshold)
+            weights[dew_valid, idx] *= negative_evap_weight
     return weights
 
 
@@ -2132,6 +2203,8 @@ def train_patch_model(
         target_names,
         args.psn_low_value_weight,
         args.psn_low_value_threshold,
+        args.negative_evap_weight,
+        args.negative_evap_threshold,
     )
     val_target_loss_weights = compute_target_loss_weights(
         y_val,
@@ -2139,6 +2212,8 @@ def train_patch_model(
         target_names,
         args.psn_low_value_weight,
         args.psn_low_value_threshold,
+        args.negative_evap_weight,
+        args.negative_evap_threshold,
     )
 
     x_train_tensor = torch.tensor(x_train_scaled, dtype=torch.float32, device=device)
@@ -2410,6 +2485,8 @@ def train_patch_model(
         "target_names": target_names,
         "target_feature_masks": target_feature_masks_by_name,
         "log1p_target_names": list(args.log1p_targets),
+        "negative_evap_weight": float(args.negative_evap_weight),
+        "negative_evap_threshold": float(args.negative_evap_threshold),
         "pft_embedding_dim": int(args.pft_embedding_dim),
         "pft_embedding_input_name": "pft_type" if pft_embedding_input_index is not None else None,
         "pft_embedding_input_index": pft_embedding_input_index,
@@ -2632,6 +2709,8 @@ def write_patch_artifacts(
         "target_names": results["target_names"],
         "target_feature_masks": results.get("target_feature_masks", {}),
         "log1p_target_names": results.get("log1p_target_names", list(DEFAULT_LOG1P_TARGET_NAMES)),
+        "negative_evap_weight": results.get("negative_evap_weight", 1.0),
+        "negative_evap_threshold": results.get("negative_evap_threshold", 0.0),
         "pft_embedding_dim": results.get("pft_embedding_dim", 0),
         "pft_embedding_input_name": results.get("pft_embedding_input_name"),
         "pft_embedding_input_index": results.get("pft_embedding_input_index"),
@@ -2667,6 +2746,8 @@ def write_patch_artifacts(
         "holdout_range": results.get("holdout_range"),
         "training_history": results["training_history"],
         "log1p_target_names": results.get("log1p_target_names", list(DEFAULT_LOG1P_TARGET_NAMES)),
+        "negative_evap_weight": results.get("negative_evap_weight", 1.0),
+        "negative_evap_threshold": results.get("negative_evap_threshold", 0.0),
         "surfdata_file": results.get("surfdata_file"),
         "surfdata_cell_stride": results.get("surfdata_cell_stride"),
         "dropped_target_names": results.get("dropped_target_names", []),
