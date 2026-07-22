@@ -43,7 +43,8 @@ if [[ -n "${REGIONAL_MAX_LAT}" ]]; then
   BBOX_ARGS+=(--regional-max-lat "${REGIONAL_MAX_LAT}")
 fi
 
-"${PYTHON_BIN}" -m elm_emulator.benchmark_replay \
+CMD=(
+  "${PYTHON_BIN}" -m elm_emulator.benchmark_replay \
   --regional \
   --universal \
   --device "${DEVICE}" \
@@ -56,7 +57,11 @@ fi
   --year "${YEAR}" \
   --month "${MONTH}" \
   --nmonths "${NMONTHS}" \
-  "${BBOX_ARGS[@]}" \
+)
+if ((${#BBOX_ARGS[@]})); then
+  CMD+=("${BBOX_ARGS[@]}")
+fi
+CMD+=(
   --regional-ncell "${REGIONAL_NCELL}" \
   --regional-daily-output "${OUT_DIR}/regional_smoke_${OUTPUT_FREQUENCY}.nc" \
   --regional-output-frequency "${OUTPUT_FREQUENCY}" \
@@ -65,3 +70,6 @@ fi
   --no-compile \
   --no-compile-physics \
   "$@"
+)
+
+"${CMD[@]}"

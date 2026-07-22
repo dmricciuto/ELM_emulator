@@ -91,6 +91,7 @@ def load_met_month_cpu(
     met_index: np.ndarray | None = None,
     met_format: str = "auto",
     calendar: str = "gregorian",
+    pad_steps: int = 0,
 ) -> np.ndarray:
     """Load one month of met forcing for the active cells.
 
@@ -115,6 +116,7 @@ def load_met_month_cpu(
             np.arange(np.asarray(grid_row).size, dtype=np.int64) if met_index is None else met_index,
             cache_dir=cache_dir,
             calendar=calendar,
+            pad_steps=pad_steps,
         )
     if met_format != "tessfa":
         raise ValueError(f"Unsupported regional met format: {met_format}")
@@ -307,6 +309,7 @@ def load_trendy_met_month_cpu(
     *,
     cache_dir: Path | None = None,
     calendar: str = "noleap",
+    pad_steps: int = 0,
 ) -> np.ndarray:
     """Load one no-leap month from TRENDY 0.5-degree compressed land forcing.
 
@@ -323,11 +326,15 @@ def load_trendy_met_month_cpu(
         )
     met_index = np.asarray(met_index, dtype=np.int64)
     ncell = int(met_index.size)
+    pad_steps_i = max(int(pad_steps), 0)
     cache_path: Path | None = None
     if cache_dir is not None:
         first = int(met_index[0]) if ncell else -1
         last = int(met_index[-1]) if ncell else -1
-        cache_path = Path(cache_dir) / f"trendy_met_n{ncell}_i{first}_to_{last}_{year_i:04d}-{month_i:02d}_v1.npy"
+        cache_path = (
+            Path(cache_dir)
+            / f"trendy_met_n{ncell}_i{first}_to_{last}_{year_i:04d}-{month_i:02d}_pad{pad_steps_i}_v2.npy"
+        )
         if cache_path.exists():
             return np.load(cache_path).astype(np.float32, copy=False)
 
@@ -336,7 +343,8 @@ def load_trendy_met_month_cpu(
     days_before_month = sum(_NOLEAP_MONTH_LENGTHS[:month_i - 1])
     t0 = (days_before_year + days_before_month) * steps_per_day
     nt = _NOLEAP_MONTH_LENGTHS[month_i - 1] * steps_per_day
-    t_slice = slice(t0, t0 + nt)
+    t_start = max(t0 - pad_steps_i, 0)
+    t_end = t0 + nt + pad_steps_i
 
     parts: list[np.ndarray] = []
     full_index = ncell > 0 and np.array_equal(met_index, np.arange(ncell, dtype=np.int64))
@@ -344,6 +352,8 @@ def load_trendy_met_month_cpu(
         fpath = _trendy_met_file(met_dir, vname)
         with Dataset(fpath) as ds:
             var = ds.variables[vname]
+            t_end_clipped = min(t_end, int(var.shape[1]))
+            t_slice = slice(t_start, t_end_clipped)
             if ncell == 1:
                 data = np.asarray(var[int(met_index[0]), t_slice], dtype=np.float32)[None, :]
             elif full_index and ncell == var.shape[0]:
@@ -353,6 +363,19 @@ def load_trendy_met_month_cpu(
                 # monthly time slice is modest, so read all land points once.
                 data_all = np.asarray(var[:, t_slice], dtype=np.float32)
                 data = data_all[met_index, :]
+            if pad_steps_i:
+                missing_left = max(pad_steps_i - t0, 0)
+                missing_right = max(t_end - int(var.shape[1]), 0)
+                if missing_left:
+                    data = np.concatenate(
+                        [np.repeat(data[:, :1], missing_left, axis=1), data],
+                        axis=1,
+                    )
+                if missing_right:
+                    data = np.concatenate(
+                        [data, np.repeat(data[:, -1:], missing_right, axis=1)],
+                        axis=1,
+                    )
             parts.append(data.T)  # (nt, ncell)
 
     result = np.stack(parts, axis=-1).astype(np.float32, copy=False)
@@ -367,6 +390,9 @@ def load_trendy_met_month_cpu(
 def interp_met_to_1h_device(
     data: "torch.Tensor",  # (nstep, ncell, nvars) – already on device
     input_step_hours: int,
+    *,
+    elm_stream_methods: bool = False,
+    padding_steps: int = 0,
 ) -> "torch.Tensor":
     """Linearly interpolate regularly spaced met data to hourly on device.
 
@@ -376,8 +402,11 @@ def interp_met_to_1h_device(
     step = int(input_step_hours)
     if step <= 0:
         raise ValueError("input_step_hours must be positive")
+    pad = max(int(padding_steps), 0)
+    if elm_stream_methods:
+        return interp_met_to_1h_elm_stream_device(data, step, padding_steps=pad)
     if step == 1:
-        return data
+        return data[pad : data.shape[0] - pad] if pad else data
     # Duplicate last step so we can always look one step ahead.
     x1 = torch.cat([data[1:], data[-1:]], dim=0)
     diff = (x1 - data).unsqueeze(1)
@@ -387,6 +416,89 @@ def interp_met_to_1h_device(
         / torch.as_tensor(float(step), device=data.device, dtype=data.dtype)
     ).reshape(1, step, 1, 1)
     out = (x0 + wts * diff).reshape(data.shape[0] * step, data.shape[1], data.shape[2])
+    return out
+
+
+def interp_met_to_1h_elm_stream_device(
+    data: "torch.Tensor",
+    input_step_hours: int,
+    *,
+    padding_steps: int = 0,
+) -> "torch.Tensor":
+    """Interpolate regional met with ELM/DATM stream methods.
+
+    For ELM cpl-bypass streams, solar is handled later with coszen
+    redistribution, precipitation uses nearest-neighbor interval values, and
+    state variables use the native cpl-bypass linear interpolation convention.
+    With 6-hour TRENDY forcing, ELM's linear variables are evaluated at the
+    model timestamp ending the current step, using the stream record just before
+    the timestamp and the following record. A padded record on each side lets
+    month boundaries match native ELM.
+    """
+    step = int(input_step_hours)
+    if step <= 0:
+        raise ValueError("input_step_hours must be positive")
+    pad = max(int(padding_steps), 0)
+    if step == 1:
+        return data[pad : data.shape[0] - pad] if pad else data
+    if pad > 0 and data.shape[0] <= 2 * pad:
+        raise ValueError(
+            f"Cannot drop {pad} padded met step(s) from data with {data.shape[0]} steps"
+        )
+    core = data[pad : data.shape[0] - pad] if pad else data
+    ncore = int(core.shape[0])
+    nout = ncore * step
+    if nout == 0:
+        return core.repeat_interleave(step, dim=0)
+
+    out = core.repeat_interleave(step, dim=0).clone()
+
+    linear_names = ("TBOT", "QBOT", "PSRF", "FLDS", "WIND")
+    linear_idx = [_MET_VAR_IDX[name] for name in linear_names]
+    if pad > 0:
+        source = data[:, :, linear_idx]
+        if 24 % step != 0:
+            raise ValueError(
+                "ELM stream interpolation currently requires input_step_hours "
+                f"to evenly divide 24, got {step}"
+            )
+        label_hour = torch.arange(1, nout + 1, device=data.device, dtype=torch.long)
+        tod_hour = torch.remainder(label_hour, 24)
+        day_index = torch.div(label_hour, 24, rounding_mode="floor")
+        source_per_day = 24 // step
+        # Mirrors E3SM_ORNL components/elm/src/cpl/lnd_import_export.F90:
+        # tindex advances after the stream center is used at tod=npf/2.
+        source_offset = torch.div(
+            tod_hour + max(step // 2 - 1, 0),
+            step,
+            rounding_mode="floor",
+        )
+        lower = (day_index * source_per_day + source_offset).clamp(0, source.shape[0] - 2)
+        phase = torch.remainder(
+            tod_hour.to(dtype=data.dtype)
+            + torch.as_tensor(24.0 - 0.5 * float(step), device=data.device, dtype=data.dtype),
+            torch.as_tensor(float(step), device=data.device, dtype=data.dtype),
+        )
+        wt1 = (1.0 - phase / float(step)).reshape(nout, 1, 1)
+        linear = source[lower] * wt1 + source[lower + 1] * (1.0 - wt1)
+    else:
+        # Fallback for unpadded non-hourly forcing. This preserves the old
+        # data availability requirements while still using per-variable methods.
+        x1 = torch.cat([core[1:, :, linear_idx], core[-1:, :, linear_idx]], dim=0)
+        diff = (x1 - core[:, :, linear_idx]).unsqueeze(1)
+        x0 = core[:, :, linear_idx].unsqueeze(1)
+        wts = (
+            torch.arange(step, device=data.device, dtype=data.dtype)
+            / torch.as_tensor(float(step), device=data.device, dtype=data.dtype)
+        ).reshape(1, step, 1, 1)
+        linear = (x0 + wts * diff).reshape(nout, data.shape[1], len(linear_idx))
+    out[:, :, linear_idx] = linear
+
+    # DATM stream metadata uses nearest-neighbor precipitation. Repeating each
+    # interval value preserves native daily totals for cpl-bypass PRECTmms.
+    out[:, :, _MET_VAR_IDX["PRECTmms"]] = core[
+        :, :, _MET_VAR_IDX["PRECTmms"]
+    ].repeat_interleave(step, dim=0)
     return out
 
 
