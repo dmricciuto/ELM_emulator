@@ -27,6 +27,7 @@ from .elm_soil_temperature import (
     HFUS,
     TFRZ,
     TKAIR,
+    THK_BEDROCK,
     TKICE,
     TKWAT,
     SoilTextureProfile,
@@ -146,6 +147,7 @@ class SoilThermalParametersTorch:
     tkmg: torch.Tensor
     tkdry: torch.Tensor
     csol: torch.Tensor
+    nlevbed: int | None = None
 
 
 @dataclass
@@ -263,6 +265,7 @@ def thermal_params_from_texture_torch(
         tkmg=_to_torch(tkmg, device, dtype),
         tkdry=_to_torch(tkdry, device, dtype),
         csol=_to_torch(csol, device, dtype),
+        nlevbed=nlevbed,
     )
 
 
@@ -633,6 +636,7 @@ def _snow_soil_temperature_step_torch(
             tkmg=select(params.tkmg),
             tkdry=select(params.tkdry),
             csol=select(params.csol),
+            nlevbed=params.nlevbed,
         )
 
     base_result = _soil_temperature_step_torch_no_snow(
@@ -1022,6 +1026,10 @@ def soil_thermal_properties_torch(
     )
     dksat = tkmg * (TKWAT ** (fl * watsat)) * (TKICE ** ((1.0 - fl) * watsat))
     thk = torch.where(satw > 1.0e-7, dke * dksat + (1.0 - dke) * tkdry, tkdry)
+    if params.nlevbed is not None:
+        nlevbed = int(params.nlevbed)
+        if nlevbed < nlev:
+            thk[..., max(nlevbed, 0) :] = THK_BEDROCK
 
     tk = torch.zeros_like(thk)
     if nlev > 1:

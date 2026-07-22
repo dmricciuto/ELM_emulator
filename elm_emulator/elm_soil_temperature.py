@@ -619,6 +619,10 @@ def soil_thermal_properties(
     )
     dksat = tkmg * TKWAT ** (fl * watsat) * TKICE ** ((1.0 - fl) * watsat)
     thk = np.where(satw > 1.0e-7, dke * dksat + (1.0 - dke) * tkdry, tkdry)
+    if params.nlevbed is not None:
+        nlevbed = int(np.asarray(params.nlevbed).item())
+        if nlevbed < nlev:
+            thk[..., max(nlevbed, 0) :] = THK_BEDROCK
 
     tk = np.zeros_like(thk)
     if nlev > 1:

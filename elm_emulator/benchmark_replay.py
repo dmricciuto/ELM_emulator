@@ -33,7 +33,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-from netCDF4 import Dataset
+from netCDF4 import Dataset, num2date
 
 try:
     import torch
@@ -66,12 +66,14 @@ from .coupled_surface_hydrology_soiltemp import (
     select_device,
     _active_snow_depth_torch,
     _active_snow_fraction_torch,
+    saturation_vapor_pressure_pa_torch,
     _total_snow_depth_torch,
     _total_snow_fraction_torch,
     _zero_snow_state,
     vapor_pressure_deficit_from_forcing_torch,
 )
 from .elm_hydrology import elm_soil_grid
+from .elm_history import ElmHistoryWriter, infer_elm_history_case_name
 from .elm_hydrology_torch import SoilHydrologyTorchWorkspace
 from .elm_soil_temperature_torch import SoilTemperatureTorchWorkspace
 from .paths import DEFAULT_CLM_PARAMS_SP, DEFAULT_MODEL_DIR, DEFAULT_TESSFA_DOMAIN2_SURFDATA
@@ -1286,8 +1288,109 @@ def plot_diagnostics(
 # Regional benchmark helpers
 # ---------------------------------------------------------------------------
 
-# CO2 mixing ratio for ca. 1980 (ppmv).  Used to compute forc_pco2.
-_CO2_PPM_1980 = 338.0
+_DEFAULT_CO2_FILE_RELATIVE = Path("atm/datm7/CO2/fco2_datm_rcp4.5_1765-2500_c130312.nc")
+_CO2_PPM_FALLBACK = 338.0
+_CO2_FILE_CACHE: dict[Path, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _infer_inputdata_root(path: Path) -> Path | None:
+    """Return the nearest ``inputdata`` ancestor for OLMT/E3SM-style paths."""
+    path = Path(path).expanduser()
+    for candidate in (path, *path.parents):
+        if candidate.name == "inputdata":
+            return candidate
+    return None
+
+
+def _default_co2_file_for_met_dir(met_dir: Path) -> Path | None:
+    inputdata_root = _infer_inputdata_root(Path(met_dir))
+    if inputdata_root is None:
+        return None
+    return inputdata_root / _DEFAULT_CO2_FILE_RELATIVE
+
+
+def _decimal_year(year: int, month: int, day: int, *, calendar: str = "noleap") -> float:
+    mdays = [_days_in_month(year, m, calendar) for m in range(1, 13)]
+    doy = int(day) + sum(mdays[: max(0, int(month) - 1)])
+    return float(year) + (float(doy) - 0.5) / float(sum(mdays))
+
+
+def _co2_var_name(ds: Dataset) -> str:
+    for name in ("CO2", "co2", "CO2_PPM", "co2_ppm"):
+        if name in ds.variables:
+            return name
+    raise ValueError("CO2 file does not contain a CO2 variable")
+
+
+def _load_co2_file_series(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    path = Path(path).expanduser()
+    cache_key = path.resolve() if path.exists() else path
+    cached = _CO2_FILE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    with Dataset(path) as ds:
+        co2_name = _co2_var_name(ds)
+        co2 = np.asarray(ds.variables[co2_name][:], dtype=np.float64)
+        if co2.ndim > 1:
+            co2 = np.nanmean(co2.reshape((co2.shape[0], -1)), axis=1)
+        if "date" in ds.variables:
+            dates = np.asarray(ds.variables["date"][:], dtype=np.int64)
+            years = dates // 10000
+            months = (dates // 100) % 100
+            days = dates % 100
+            x = np.asarray(
+                [
+                    _decimal_year(int(year), int(month), int(day), calendar="noleap")
+                    for year, month, day in zip(years, months, days)
+                ],
+                dtype=np.float64,
+            )
+        elif "time" in ds.variables:
+            time_var = ds.variables["time"]
+            calendar = str(getattr(time_var, "calendar", "noleap")).lower()
+            dates = num2date(
+                time_var[:],
+                time_var.units,
+                calendar=calendar,
+                only_use_cftime_datetimes=False,
+                only_use_python_datetimes=False,
+            )
+            x = np.asarray(
+                [
+                    _decimal_year(
+                        int(date.year),
+                        int(date.month),
+                        int(date.day),
+                        calendar="noleap" if calendar == "noleap" else "gregorian",
+                    )
+                    for date in dates
+                ],
+                dtype=np.float64,
+            )
+        else:
+            raise ValueError("CO2 file must contain either a date or time coordinate")
+    if x.size != co2.size:
+        raise ValueError(f"CO2 coordinate length {x.size} does not match CO2 length {co2.size}")
+    order = np.argsort(x)
+    result = (x[order], co2[order])
+    _CO2_FILE_CACHE[cache_key] = result
+    return result
+
+
+def _co2_ppm_from_file(path: Path, year: int, month: int, *, calendar: str = "noleap") -> float:
+    x, co2 = _load_co2_file_series(path)
+    mdays = _days_in_month(year, month, calendar)
+    target = _decimal_year(year, month, max(1, int(round(mdays * 0.5))), calendar=calendar)
+    return float(np.interp(target, x, co2, left=co2[0], right=co2[-1]))
+
+
+def _resolve_regional_co2_file(co2_file: Path | None, met_dir: Path) -> Path | None:
+    if co2_file is not None:
+        return Path(co2_file).expanduser()
+    default_path = _default_co2_file_for_met_dir(met_dir)
+    if default_path is not None and default_path.exists():
+        return default_path
+    return None
 
 def _find_elm_history_file(path: Path, year: int) -> Path:
     """Find the ELM h0 history file for ``year`` under a case run directory."""
@@ -1620,6 +1723,7 @@ def build_regional_static_vectorized(
         tkmg  = _unsqueeze_if_2d(soil_torch.tkmg),
         tkdry = _unsqueeze_if_2d(soil_torch.tkdry),
         csol  = _unsqueeze_if_2d(soil_torch.csol),
+        nlevbed = soil_torch.nlevbed,
     )
     # thermal_params_from_texture (numpy) only accepts 1D texture.  Build a
     # domain-mean placeholder — it is never called in the torch-backend regional path.
@@ -1771,6 +1875,8 @@ def run_regional_pass(
     year: int,
     month: int,
     met_input_step_hours: int = 3,
+    met_padding_steps: int = 0,
+    elm_stream_met_methods: bool = False,
     calendar: str = "gregorian",
     dt: float = 3600.0,
     device: "torch.device",
@@ -1780,7 +1886,7 @@ def run_regional_pass(
     soil_temperature_backend: str = "torch",
     snow_model_enabled: bool = True,
     snow_scalar_only: bool = False,
-    co2_ppm: float = _CO2_PPM_1980,
+    co2_ppm: float = _CO2_PPM_FALLBACK,
     initial_state=None,             # if None, cold start
     profile_sections: "dict[str, float] | None" = None,
     precomputed: "dict | None" = None,  # output of _precompute_month_cpu; avoids recompute
@@ -1794,12 +1900,14 @@ def run_regional_pass(
     progress_stride: int = 24,
     record_diag_maps: bool = True,
     record_daily_diag_maps: bool = False,
+    record_hourly_diag_maps: bool = False,
     record_day_night_flux_maps: bool = False,
     day_night_fsds_threshold: float = 20.0,
     safety_clamps: bool = True,
     temperature_min_k: float = 180.0,
     temperature_max_k: float = 330.0,
     photosynthesis_max: float = 100.0,
+    thermal_target_z_clamp: float = 3.0,
     physics_step_hours: float = 1.0,
     universal_mlp_batch: bool = False,
     sparse_universal_mlp_batch: bool = True,
@@ -1839,9 +1947,14 @@ def run_regional_pass(
         distribute_root_uptake,
         sabg_snow_from_state_torch,
         _absorbed_ground_shortwave_torch,
+        _snow_albedo_from_grain_radius_torch,
+        surface_shortwave_diagnostics_torch,
+        coupled_t_grnd_from_state_torch,
         coupled_soilbeta_from_state_torch,
         coupled_btran_from_state_torch,
         TFRZ,
+        SNOW_MIN_ACTIVE_DEPTH,
+        SNW_RDS_MIN,
         DENH2O,
         DENICE,
         SECSPDAY,
@@ -1954,7 +2067,12 @@ def run_regional_pass(
     if trait_ensemble_size > 1 and not universal_mlp_batch:
         raise ValueError("--regional-trait-ensemble-size > 1 requires --universal")
     # Interpolate met to hourly on device.
-    met_1h = interp_met_to_1h_device(met_3h, met_input_step_hours)   # (n1h, ncell, 7)
+    met_1h = interp_met_to_1h_device(   # (n1h, ncell, 7)
+        met_3h,
+        met_input_step_hours,
+        elm_stream_methods=elm_stream_met_methods,
+        padding_steps=met_padding_steps,
+    )
     if max_hours is not None:
         max_hours_i = int(max_hours)
         if max_hours_i <= 0:
@@ -2095,8 +2213,13 @@ def run_regional_pass(
             f"(precompute calendar={pc_calendar!r})."
         )
     if met_input_step_hours > 1:
+        met_interval = (
+            met_3h[met_padding_steps : met_3h.shape[0] - met_padding_steps]
+            if met_padding_steps
+            else met_3h
+        )
         met_1h[:, :, _MET_VAR_IDX["FSDS"]] = redistribute_shortwave_to_1h_device(
-            met_3h,
+            met_interval,
             coszen_dev,
             met_input_step_hours,
             n1h=n1h,
@@ -3226,6 +3349,11 @@ def run_regional_pass(
     _universal_fast_steps = 0
     # Accumulators for diagnostic maps (time-mean, kept on device).
     _acc_forc_t: "torch.Tensor | None" = None
+    _acc_forc_q: "torch.Tensor | None" = None
+    _acc_forc_pbot: "torch.Tensor | None" = None
+    _acc_forc_lwrad: "torch.Tensor | None" = None
+    _acc_forc_wind: "torch.Tensor | None" = None
+    _acc_rh2m: "torch.Tensor | None" = None
     _acc_forc_rain: "torch.Tensor | None" = None
     _acc_forc_snow: "torch.Tensor | None" = None
     _acc_fsds: "torch.Tensor | None" = None
@@ -3233,6 +3361,8 @@ def run_regional_pass(
     _acc_lai:    "torch.Tensor | None" = None
     _acc_t_soil: "torch.Tensor | None" = None
     _acc_t_soil_layers: "torch.Tensor | None" = None
+    _acc_elm_h0_tsoi: "torch.Tensor | None" = None
+    _acc_elm_h0_h2osoi: "torch.Tensor | None" = None
     _acc_t_veg:  "torch.Tensor | None" = None
     _acc_liq:    "torch.Tensor | None" = None
     _acc_liq_layers: "torch.Tensor | None" = None
@@ -3248,6 +3378,12 @@ def run_regional_pass(
     _acc_evap_soi: "torch.Tensor | None" = None
     _acc_evap_tot: "torch.Tensor | None" = None
     _acc_sh: "torch.Tensor | None" = None
+    _acc_tg: "torch.Tensor | None" = None
+    _acc_fgr: "torch.Tensor | None" = None
+    _acc_hs_soil: "torch.Tensor | None" = None
+    _acc_hs_top_snow: "torch.Tensor | None" = None
+    _acc_hs_h2osfc: "torch.Tensor | None" = None
+    _acc_dhsdT: "torch.Tensor | None" = None
     _acc_runoff_surf: "torch.Tensor | None" = None
     _acc_runoff_h2osfc_surf: "torch.Tensor | None" = None
     _acc_runoff_drain: "torch.Tensor | None" = None
@@ -3257,6 +3393,7 @@ def run_regional_pass(
     _acc_snow_depth: "torch.Tensor | None" = None
     _acc_active_snow_depth: "torch.Tensor | None" = None
     _acc_snow_depth_eff: "torch.Tensor | None" = None
+    _acc_shortwave_diag: "dict[str, torch.Tensor]" = {}
     _acc_ood_max_z: "torch.Tensor | None" = None
     _acc_ood_frac:  "torch.Tensor | None" = None
     _acc_ood_feature_z: "dict[str, torch.Tensor]" = {}
@@ -3283,6 +3420,13 @@ def run_regional_pass(
     _daily_trait_std_sum: "dict[str, torch.Tensor]" = {}
     _period_trait_std_sum: "dict[str, torch.Tensor]" = {}
     _period_trait_std_count = 0
+    _daily_shortwave_rows: "dict[str, list[np.ndarray]]" = {}
+    _daily_shortwave_sum: "dict[str, torch.Tensor]" = {}
+    _daily_elm_h0_tsoi_rows: list[np.ndarray] = []
+    _daily_elm_h0_h2osoi_rows: list[np.ndarray] = []
+    _daily_elm_h0_tsoi_sum: "torch.Tensor | None" = None
+    _daily_elm_h0_h2osoi_sum: "torch.Tensor | None" = None
+    _hourly_h0_rows: "dict[str, list[np.ndarray]]" = {}
     # Hoist layer thicknesses out of the per-step loop (avoids GPU→CPU sync each step).
     _dz0_diag = float(shared_static.hydrology_torch.dz[0])  # [m]
     _dz_liq_diag = torch.as_tensor(
@@ -3290,6 +3434,11 @@ def run_regional_pass(
         device=device,
         dtype=dtype,
     )  # [m], layers 1-5
+    _dz_hydro_diag = torch.as_tensor(
+        shared_static.hydrology_torch.dz[:nlev_hydro_static],
+        device=device,
+        dtype=dtype,
+    )  # [m], hydrology layers
     _outlier_topk = 8
     _outlier_thresholds = {
         "fpsn": 100.0,
@@ -3364,6 +3513,7 @@ def run_regional_pass(
     _clip_counts = {
         "state_temperature": torch.zeros((), device=device, dtype=_clip_count_dtype),
         "photosynthesis": torch.zeros((), device=device, dtype=_clip_count_dtype),
+        "thermal_target": torch.zeros((), device=device, dtype=_clip_count_dtype),
     }
 
     def _profile_start() -> float:
@@ -3514,6 +3664,43 @@ def run_regional_pass(
                 max_value=photosynthesis_max,
                 count_name="photosynthesis",
             )
+        return targets
+
+    _thermal_target_names = ("hs_soil", "hs_top_snow", "hs_h2osfc")
+    _thermal_target_z_clamp = float(thermal_target_z_clamp)
+    _thermal_target_ref_bundle = universal_ref_bundle or (pft_bundles[0] if pft_bundles else None)
+    _thermal_target_limits: dict[str, tuple[float, float]] = {}
+    if _thermal_target_z_clamp > 0.0 and _thermal_target_ref_bundle is not None:
+        _target_idx = {name: idx for idx, name in enumerate(_thermal_target_ref_bundle.target_names)}
+        for _target_name in _thermal_target_names:
+            _stats_name = "hs_soil" if _target_name == "hs_top_snow" else _target_name
+            _idx = _target_idx.get(_stats_name)
+            if _idx is None:
+                continue
+            _mean = float(np.asarray(_thermal_target_ref_bundle.y_mean, dtype=np.float64)[_idx])
+            _std = float(np.asarray(_thermal_target_ref_bundle.y_std, dtype=np.float64)[_idx])
+            if np.isfinite(_mean) and np.isfinite(_std) and _std > 0.0:
+                _span = _thermal_target_z_clamp * _std
+                _thermal_target_limits[_target_name] = (_mean - _span, _mean + _span)
+
+    def _clip_thermal_boundary_targets(targets: dict) -> dict:
+        if not safety_clamps or not _thermal_target_limits:
+            return targets
+        for name, (lower, upper) in _thermal_target_limits.items():
+            value = targets.get(name)
+            if value is None:
+                continue
+            key = f"thermal_target_{name}"
+            if key not in _clip_counts:
+                _clip_counts[key] = torch.zeros((), device=device, dtype=_clip_count_dtype)
+            before = _clip_counts["thermal_target"]
+            targets[name] = _safety_clamp_tensor(
+                value,
+                min_value=lower,
+                max_value=upper,
+                count_name="thermal_target",
+            )
+            _clip_counts[key] = _clip_counts[key] + (_clip_counts["thermal_target"] - before)
         return targets
 
     def _bare_ground_target_fallback(
@@ -4423,20 +4610,41 @@ def run_regional_pass(
     state = _clip_state_temperatures(state)
 
     def _solar_components_from_fsds(fsds_t: "torch.Tensor", coszen_t: "torch.Tensor", doy_i: int) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+        """Split total FSDS using native ELM cpl-bypass solar partitioning.
+
+        ELM first applies the stream/coszen weighting to total shortwave, then
+        splits the weighted flux 50/50 into VIS/NIR and uses separate cubic
+        fits for the direct fraction in each band.
+        """
         sw = torch.clamp(fsds_t, min=0.0)
-        cosz = torch.clamp(coszen_t, min=0.0)
-        seasonal = 0.55 + 0.45 * np.cos(2.0 * np.pi * (float(doy_i) - 172.0) / 365.0)
-        sw_clear = torch.clamp(780.0 * seasonal * cosz, min=1.0e-6)
-        clearness = torch.clamp(sw / sw_clear, min=0.0, max=1.0)
-        cloud_frac = torch.clamp((1.0 - clearness) / 0.55, min=0.0, max=1.0)
-        diffuse_frac = torch.clamp(0.28 + 0.42 * cloud_frac, min=0.20, max=0.85)
-        diffuse_frac = torch.where(sw > 1.0e-9, diffuse_frac, torch.zeros_like(diffuse_frac))
-        direct_frac = torch.where(sw > 1.0e-9, 1.0 - diffuse_frac, torch.zeros_like(diffuse_frac))
-        forc_solad_vis = 0.45 * direct_frac * sw
-        forc_solad_nir = 0.55 * direct_frac * sw
-        forc_solai_vis = 0.45 * diffuse_frac * sw
-        forc_solai_nir = 0.55 * diffuse_frac * sw
+        half_sw = 0.50 * sw
+        ratio_nir = torch.clamp(
+            0.29548
+            + 0.00504 * half_sw
+            - 1.4957e-05 * half_sw * half_sw
+            + 1.4881e-08 * half_sw * half_sw * half_sw,
+            min=0.01,
+            max=0.99,
+        )
+        ratio_vis = torch.clamp(
+            0.17639
+            + 0.00380 * half_sw
+            - 9.0039e-06 * half_sw * half_sw
+            + 8.1351e-09 * half_sw * half_sw * half_sw,
+            min=0.01,
+            max=0.99,
+        )
+        forc_solad_vis = ratio_vis * half_sw
+        forc_solad_nir = ratio_nir * half_sw
+        forc_solai_vis = (1.0 - ratio_vis) * half_sw
+        forc_solai_nir = (1.0 - ratio_nir) * half_sw
         return forc_solad_vis, forc_solad_nir, forc_solai_vis, forc_solai_nir
+
+    def _prescribed_frac_veg_nosno(lai: torch.Tensor, sai: torch.Tensor) -> torch.Tensor:
+        # ELM treats exposed stem area as canopy, so no-carbon vegetation is
+        # active when either prescribed LAI or SAI is present.
+        exposed_area = torch.clamp(lai, min=0.0) + torch.clamp(sai, min=0.0)
+        return (exposed_area > 0.0).to(dtype=dtype)
 
     universal_step_rootr: "torch.Tensor | None" = None
 
@@ -4666,6 +4874,8 @@ def run_regional_pass(
         prescribed_sai_active = torch.stack([sai_today[pid] for pid in pft_ids], dim=0)
         htop_active = torch.stack([htop_today[pid] for pid in pft_ids], dim=0)
         hbot_active = torch.stack([hbot_today[pid] for pid in pft_ids], dim=0)
+        no_carbon_prescribed_veg = carbon_model is None
+
         if carbon_model is not None:
             veg_structure = carbon_model.update_vegetation_structure_by_pft(
                 fallback_lai_by_pft=prescribed_lai_active,
@@ -4683,14 +4893,16 @@ def run_regional_pass(
             lai_active_today = prescribed_lai_active
             sai_active_today = prescribed_sai_active
             htop_active_today = htop_active
-            frac_veg_active_today = (lai_active_today > 0.01).to(dtype=dtype)
+            frac_veg_active_today = _prescribed_frac_veg_nosno(lai_active_today, sai_active_today)
         if lai_scale != 1.0:
             lai_active_today = torch.clamp(lai_active_today * lai_scale, min=0.0)
         if lai_add_applies:
             lai_active_today = torch.clamp(lai_active_today + lai_add * _lai_add_pft_mask, min=0.0)
         if sai_scale != 1.0:
             sai_active_today = torch.clamp(sai_active_today * sai_scale, min=0.0)
-        if lai_add_applies or lai_scale != 1.0:
+        if no_carbon_prescribed_veg and (lai_add_applies or lai_scale != 1.0 or sai_scale != 1.0):
+            frac_veg_active_today = _prescribed_frac_veg_nosno(lai_active_today, sai_active_today)
+        elif (not no_carbon_prescribed_veg) and (lai_add_applies or lai_scale != 1.0):
             frac_veg_active_today = (lai_active_today > 0.01).to(dtype=dtype)
         common_feature_state = _profile_call(
             "feature_common_state",
@@ -5230,6 +5442,7 @@ def run_regional_pass(
         blended["diag_h2osoi_ice_input"] = state.h2osoi_ice
         if btran_input_col is not None:
             blended["diag_btran_input"] = btran_input_col
+        blended = _clip_thermal_boundary_targets(blended)
         if ground_heat_flux_override_t is not None:
             _gh_override = ground_heat_flux_override_t[min(int(step_i), ground_heat_flux_override_t.shape[0] - 1)]
             _gh_override = _gh_override.unsqueeze(1).expand(-1, nens)
@@ -5523,9 +5736,16 @@ def run_regional_pass(
             if getattr(state, "frac_sno", None) is not None:
                 _update_outlier("frac_sno", _cell_mean_tensor(state.frac_sno))
 
-        if record_diag_maps or record_daily_diag_maps:
+        if record_diag_maps or record_daily_diag_maps or record_hourly_diag_maps:
             # Accumulate diagnostic maps (squeezed to (ncell,) on device).
             _t = tbot.expand(-1, nens).mean(1) if nens > 1 else tbot.squeeze(1)  # (ncell,)
+            _q = qbot.expand(-1, nens).mean(1) if nens > 1 else qbot.squeeze(1)
+            _pbot = psrf.expand(-1, nens).mean(1) if nens > 1 else psrf.squeeze(1)
+            _lwrad = flds.expand(-1, nens).mean(1) if nens > 1 else flds.squeeze(1)
+            _wind = wind.expand(-1, nens).mean(1) if nens > 1 else wind.squeeze(1)
+            _esat = torch.clamp(saturation_vapor_pressure_pa_torch(tbot), min=1.0e-6)
+            _rh2m = torch.clamp(100.0 * (_esat - forc_vpd) / _esat, min=0.0, max=100.0)
+            _rh2m_diag = _rh2m.expand(-1, nens).mean(1) if nens > 1 else _rh2m.squeeze(1)
             _f_raw = blended.get("fpsn_patch")
             # Area-weighted LAI across active PFTs for this step.
             _lai_col = lai_area_weighted.mean(1)  # (ncell,)
@@ -5546,6 +5766,7 @@ def run_regional_pass(
             _gpp_gc_diag = _f_diag * (SECSPDAY * GPP_UMOL_CO2_TO_GC)
             _t_soil = _diag_tensor(state.t_soisno[..., 0]).mean(1)   # (ncell,)
             _t_soil_layers = _diag_tensor(state.t_soisno[..., [0, 2, 4]]).mean(1)
+            _t_soil_all_layers = _diag_tensor(state.t_soisno[..., :nlev]).mean(1)
             _t_veg = blended.get("t_veg")
             _t_veg_diag = (
                 _diag_tensor(_t_veg).mean(1)
@@ -5555,8 +5776,118 @@ def run_regional_pass(
             _rain_diag = forc_rain.mean(1)
             _snow_diag = forc_snow.mean(1)
             _fsds_diag = fsds.mean(1)
+            _shortwave_diag: dict[str, "torch.Tensor"] = {}
+            def _pft_static_stack(name: str) -> "torch.Tensor | None":
+                rows = []
+                for pft_static in pft_statics:
+                    raw = getattr(pft_static, name, None)
+                    if raw is None:
+                        return None
+                    value_t = _diag_tensor(raw).reshape(-1)
+                    if value_t.numel() == 0:
+                        return None
+                    rows.append(value_t[0].reshape(1, 1).expand(ncell, 1))
+                return torch.stack(rows, dim=0)
+
+            _rad_static = {
+                _name: _pft_static_stack(_name)
+                for _name in (
+                    "rholvis",
+                    "rholnir",
+                    "taulvis",
+                    "taulnir",
+                    "rhosvis",
+                    "rhosnir",
+                    "tausvis",
+                    "tausnir",
+                    "xl",
+                )
+            }
+            if all(_value is not None for _value in _rad_static.values()):
+                _frac_sno_for_rad = blended.get("diag_frac_sno_input", state.frac_sno)
+                _snow_albedo_for_rad = None
+                if (
+                    _frac_sno_for_rad is not None
+                    and state.snow_layers is not None
+                    and state.snow_layers.snw_rds is not None
+                ):
+                    _frac_sno_t = torch.clamp(_diag_tensor(_frac_sno_for_rad), min=0.0, max=1.0)
+                    _has_snow = _frac_sno_t > 1.0e-8
+                    if state.h2osno is not None:
+                        _has_snow = _has_snow & (_diag_tensor(state.h2osno) > 1.0e-8)
+                    if state.snow_depth is not None:
+                        _has_snow = _has_snow & (_diag_tensor(state.snow_depth) >= SNOW_MIN_ACTIVE_DEPTH)
+                    _snl_raw = state.snow_layers.snl
+                    _snl_t = (
+                        _snl_raw.to(device=device)
+                        if isinstance(_snl_raw, torch.Tensor)
+                        else torch.as_tensor(_snl_raw, device=device)
+                    )
+                    _has_snow = _has_snow & (_snl_t < 0)
+                    _snw_rds = _diag_tensor(state.snow_layers.snw_rds)
+                    _snw_rds_top = torch.where(
+                        _has_snow,
+                        _snw_rds[..., 0],
+                        torch.full_like(_snw_rds[..., 0], SNW_RDS_MIN),
+                    )
+                    _snow_albedo_for_rad = _snow_albedo_from_grain_radius_torch(
+                        _snw_rds_top,
+                        device=device,
+                        dtype=dtype,
+                    )
+                _rad_by_pft = surface_shortwave_diagnostics_torch(
+                    fsds,
+                    device=device,
+                    dtype=dtype,
+                    elai=lai_active_today.unsqueeze(-1),
+                    esai=sai_active_today.unsqueeze(-1),
+                    atmosphere=atmosphere,
+                    soil_color=shared_static.soil_color,
+                    h2osoi_vol_top=common_feature_state["h2osoi_vol"][..., 0],
+                    frac_sno=_frac_sno_for_rad,
+                    snow_albedo=_snow_albedo_for_rad,
+                    rholvis=_rad_static["rholvis"],
+                    rholnir=_rad_static["rholnir"],
+                    taulvis=_rad_static["taulvis"],
+                    taulnir=_rad_static["taulnir"],
+                    rhosvis=_rad_static["rhosvis"],
+                    rhosnir=_rad_static["rhosnir"],
+                    tausvis=_rad_static["tausvis"],
+                    tausnir=_rad_static["tausnir"],
+                    xl=_rad_static["xl"],
+                )
+                _numrad_diag_keys = {"albgrd_mean", "albgri_mean", "albd_mean", "albi_mean"}
+                def _reduce_shortwave_diag(_key: str, _value: "torch.Tensor") -> "torch.Tensor":
+                    _blended = _blend_pft_stack(_value)
+                    if _key in _numrad_diag_keys:
+                        if _blended.ndim == 3 and _blended.shape[-1] == 2:
+                            return _blended.mean(1)
+                        if _blended.ndim == 2 and _blended.shape[-1] == 2:
+                            return _blended
+                        raise RuntimeError(
+                            f"{_key} shortwave diagnostic has shape {tuple(_blended.shape)}, "
+                            "expected (ncell, nens, 2) or (ncell, 2)"
+                        )
+                    if _blended.ndim == 2:
+                        return _blended.mean(1)
+                    if _blended.ndim == 1:
+                        return _blended
+                    raise RuntimeError(
+                        f"{_key} shortwave diagnostic has shape {tuple(_blended.shape)}, "
+                        "expected (ncell, nens) or (ncell,)"
+                    )
+                _shortwave_diag = {
+                    _key: _reduce_shortwave_diag(_key, _value)
+                    for _key, _value in _rad_by_pft.items()
+                }
             # Volumetric liquid water content: liq [kg/m²] / (dz [m] * DENH2O [kg/m³]).
-            _liq_vol_layers = _diag_tensor(state.h2osoi_liq[..., :5]).mean(1) / (_dz_liq_diag * 1000.0)
+            _soil_liq_hydro_full = _diag_tensor(state.h2osoi_liq[..., :nlev_hydro_static])
+            _soil_ice_hydro_full = _diag_tensor(state.h2osoi_ice[..., :nlev_hydro_static])
+            _liq_vol_layers = _soil_liq_hydro_full[..., :5].mean(1) / (_dz_liq_diag * 1000.0)
+            _h2osoi_vol_all_layers = (
+                (_soil_liq_hydro_full + _soil_ice_hydro_full).mean(1)
+                / (_dz_hydro_diag * 1000.0)
+            )
             _liq_vol = _liq_vol_layers[:, 0]  # (ncell,) m³/m³
             _h2osfc = _diag_tensor(state.h2osfc).mean(1)  # (ncell,) kg/m² == mm water equivalent
             _zwt = (
@@ -5668,6 +5999,35 @@ def run_regional_pass(
                 if _sh is not None
                 else torch.zeros_like(_t)
             )
+            _soil_temp_result = (
+                getattr(last_result, "soil_temperature_result", None)
+                if last_result is not None
+                else None
+            )
+            _eflx_fgr12_raw = (
+                None
+                if _soil_temp_result is None
+                else getattr(_soil_temp_result, "eflx_fgr12", None)
+            )
+            _eflx_fgr12_diag = (
+                _diag_tensor(_eflx_fgr12_raw).mean(1)
+                if _eflx_fgr12_raw is not None
+                else torch.zeros_like(_t)
+            )
+            def _target_diag(name: str) -> "torch.Tensor":
+                _raw = blended.get(name)
+                if _raw is None:
+                    return torch.full_like(_t, torch.nan)
+                _value = _diag_tensor(_raw)
+                return _value.mean(1) if _value.ndim > 1 else _value
+
+            _hs_soil_diag = _target_diag("hs_soil")
+            _hs_top_snow_diag = _target_diag("hs_top_snow")
+            _hs_h2osfc_diag = _target_diag("hs_h2osfc")
+            _dhsdT_diag = _target_diag("dhsdT")
+            _tg_diag = _diag_tensor(
+                coupled_t_grnd_from_state_torch(state, device, dtype)
+            ).mean(1)
             _trait_std_diag: dict[str, "torch.Tensor"] = {}
             if universal_trait_var_targets_stack is not None:
                 for _target_name, _out_key in _REGIONAL_TRAIT_STD_TARGET_MAP.items():
@@ -5730,6 +6090,62 @@ def run_regional_pass(
             _active_frac_sno_diag = _diag_tensor(_active_frac_sno_full).mean(1)
             _active_snow_depth_diag = _diag_tensor(_active_snow_depth_full).mean(1)
             _snow_depth_eff_diag = (_frac_sno_diag_full * _snow_depth_full).mean(1)
+            if record_hourly_diag_maps:
+                def _append_hourly_h0(_key: str, _value: "torch.Tensor") -> None:
+                    _hourly_h0_rows.setdefault(_key, []).append(
+                        _value.detach().cpu().numpy().astype(np.float32, copy=False)
+                    )
+
+                for _key, _value in (
+                    ("forc_t_mean", _t),
+                    ("forc_q_mean", _q),
+                    ("forc_pbot_mean", _pbot),
+                    ("forc_lwrad_mean", _lwrad),
+                    ("forc_wind_mean", _wind),
+                    ("rh2m_mean", _rh2m_diag),
+                    ("forc_rain_mean", _rain_diag),
+                    ("forc_snow_mean", _snow_diag),
+                    ("fsds_mean", _fsds_diag),
+                    ("fpsn_mean", _f_diag),
+                    ("gpp_gc_m2_d_mean", _gpp_gc_diag),
+                    ("lai_mean", _lai_col),
+                    ("tg_mean", _tg_diag),
+                    ("eflx_fgr12_mean", _eflx_fgr12_diag),
+                    ("hs_soil_mean", _hs_soil_diag),
+                    ("hs_top_snow_mean", _hs_top_snow_diag),
+                    ("hs_h2osfc_mean", _hs_h2osfc_diag),
+                    ("dhsdT_mean", _dhsdT_diag),
+                    ("elm_h0_TSOI", _t_soil_all_layers),
+                    ("elm_h0_H2OSOI", _h2osoi_vol_all_layers),
+                    ("t_veg_mean", _t_veg_diag),
+                    ("liq_mean", _liq_vol),
+                    ("h2osfc_mean", _h2osfc),
+                    ("h2osno_mean", _h2osno_diag),
+                    ("frac_sno_mean", _frac_sno_diag),
+                    ("active_frac_sno_mean", _active_frac_sno_diag),
+                    ("zwt_mean", _zwt),
+                    ("btran_mean", _btran_diag),
+                    ("qvegt_mean", _tran_diag),
+                    ("qflx_tran_veg_mean", _tran_diag),
+                    ("qvege_mean", _canopy_evap_diag),
+                    ("qflx_ev_soil_mean", _ev_soil_diag),
+                    ("qsoil_mean", _evap_soi_diag),
+                    ("qflx_evap_soi_mean", _evap_soi_diag),
+                    ("qflx_evap_tot_mean", _evap_tot_diag),
+                    ("eflx_lh_tot_mean", _lh_diag),
+                    ("eflx_sh_tot_mean", _sh_diag),
+                    ("qflx_surf_mean", _runoff_surf_diag),
+                    ("qflx_h2osfc_surf_mean", _runoff_h2osfc_surf_diag),
+                    ("qflx_drain_mean", _runoff_drain_diag),
+                    ("qflx_deep_drain_mean", _runoff_deep_drain_diag),
+                    ("qflx_runoff_tot_mean", _runoff_tot_diag),
+                    ("snow_depth_mean", _snow_depth_diag),
+                    ("active_snow_depth_mean", _active_snow_depth_diag),
+                    ("snow_depth_eff_mean", _snow_depth_eff_diag),
+                ):
+                    _append_hourly_h0(_key, _value)
+                for _key, _value in _shortwave_diag.items():
+                    _append_hourly_h0(_key, _value)
             if record_daily_diag_maps:
                 if _f_raw is not None:
                     if _daily_fpsn_ens_sum is None:
@@ -5761,6 +6177,11 @@ def run_regional_pass(
                         else:
                             _period_trait_std_sum[_key] = _value.clone()
                     _period_trait_std_count += 1
+                for _key, _value in _shortwave_diag.items():
+                    if _key in _daily_shortwave_sum:
+                        _daily_shortwave_sum[_key].add_(_value)
+                    else:
+                        _daily_shortwave_sum[_key] = _value.clone()
                 _water_diag_nlev = min(_WATER_DIAG_NLEV, nlev_hydro_static)
                 _soil_liq_full = _diag_tensor(state.h2osoi_liq[..., :nlev_hydro_static])
                 _soil_ice_full = _diag_tensor(state.h2osoi_ice[..., :nlev_hydro_static])
@@ -5801,6 +6222,11 @@ def run_regional_pass(
             if record_diag_maps:
                 if _acc_forc_t is None:
                     _acc_forc_t = _t.clone()
+                    _acc_forc_q = _q.clone()
+                    _acc_forc_pbot = _pbot.clone()
+                    _acc_forc_lwrad = _lwrad.clone()
+                    _acc_forc_wind = _wind.clone()
+                    _acc_rh2m = _rh2m_diag.clone()
                     _acc_forc_rain = _rain_diag.clone()
                     _acc_forc_snow = _snow_diag.clone()
                     _acc_fsds = _fsds_diag.clone()
@@ -5808,6 +6234,8 @@ def run_regional_pass(
                     _acc_lai    = _lai_col.clone()
                     _acc_t_soil = _t_soil.clone()
                     _acc_t_soil_layers = _t_soil_layers.clone()
+                    _acc_elm_h0_tsoi = _t_soil_all_layers.clone()
+                    _acc_elm_h0_h2osoi = _h2osoi_vol_all_layers.clone()
                     _acc_t_veg  = _t_veg_diag.clone()
                     _acc_liq    = _liq_vol.clone()
                     _acc_liq_layers = _liq_vol_layers.clone()
@@ -5823,6 +6251,12 @@ def run_regional_pass(
                     _acc_evap_soi = _evap_soi_diag.clone()
                     _acc_evap_tot = _evap_tot_diag.clone()
                     _acc_sh = _sh_diag.clone()
+                    _acc_tg = _tg_diag.clone()
+                    _acc_fgr = _eflx_fgr12_diag.clone()
+                    _acc_hs_soil = _hs_soil_diag.clone()
+                    _acc_hs_top_snow = _hs_top_snow_diag.clone()
+                    _acc_hs_h2osfc = _hs_h2osfc_diag.clone()
+                    _acc_dhsdT = _dhsdT_diag.clone()
                     _acc_runoff_surf = _runoff_surf_diag.clone()
                     _acc_runoff_h2osfc_surf = _runoff_h2osfc_surf_diag.clone()
                     _acc_runoff_drain = _runoff_drain_diag.clone()
@@ -5834,6 +6268,11 @@ def run_regional_pass(
                     _acc_snow_depth_eff = _snow_depth_eff_diag.clone()
                 else:
                     _acc_forc_t.add_(_t)
+                    _acc_forc_q.add_(_q)
+                    _acc_forc_pbot.add_(_pbot)
+                    _acc_forc_lwrad.add_(_lwrad)
+                    _acc_forc_wind.add_(_wind)
+                    _acc_rh2m.add_(_rh2m_diag)
                     _acc_forc_rain.add_(_rain_diag)
                     _acc_forc_snow.add_(_snow_diag)
                     _acc_fsds.add_(_fsds_diag)
@@ -5841,6 +6280,8 @@ def run_regional_pass(
                     _acc_lai.add_(_lai_col)
                     _acc_t_soil.add_(_t_soil)
                     _acc_t_soil_layers.add_(_t_soil_layers)
+                    _acc_elm_h0_tsoi.add_(_t_soil_all_layers)
+                    _acc_elm_h0_h2osoi.add_(_h2osoi_vol_all_layers)
                     _acc_t_veg.add_(_t_veg_diag)
                     _acc_liq.add_(_liq_vol)
                     _acc_liq_layers.add_(_liq_vol_layers)
@@ -5856,6 +6297,12 @@ def run_regional_pass(
                     _acc_evap_soi.add_(_evap_soi_diag)
                     _acc_evap_tot.add_(_evap_tot_diag)
                     _acc_sh.add_(_sh_diag)
+                    _acc_tg.add_(_tg_diag)
+                    _acc_fgr.add_(_eflx_fgr12_diag)
+                    _acc_hs_soil.add_(_hs_soil_diag)
+                    _acc_hs_top_snow.add_(_hs_top_snow_diag)
+                    _acc_hs_h2osfc.add_(_hs_h2osfc_diag)
+                    _acc_dhsdT.add_(_dhsdT_diag)
                     _acc_runoff_surf.add_(_runoff_surf_diag)
                     _acc_runoff_h2osfc_surf.add_(_runoff_h2osfc_surf_diag)
                     _acc_runoff_drain.add_(_runoff_drain_diag)
@@ -5865,6 +6312,11 @@ def run_regional_pass(
                     _acc_snow_depth.add_(_snow_depth_diag)
                     _acc_active_snow_depth.add_(_active_snow_depth_diag)
                     _acc_snow_depth_eff.add_(_snow_depth_eff_diag)
+                for _key, _value in _shortwave_diag.items():
+                    if _key in _acc_shortwave_diag:
+                        _acc_shortwave_diag[_key].add_(_value)
+                    else:
+                        _acc_shortwave_diag[_key] = _value.clone()
                 for _key, _value in _trait_std_diag.items():
                     if _key in _acc_trait_std:
                         _acc_trait_std[_key].add_(_value)
@@ -5890,6 +6342,12 @@ def run_regional_pass(
                         _rain_diag,
                         _snow_diag,
                         _fsds_diag,
+                        _tg_diag,
+                        _eflx_fgr12_diag,
+                        _hs_soil_diag,
+                        _hs_top_snow_diag,
+                        _hs_h2osfc_diag,
+                        _dhsdT_diag,
                         _f_diag,
                         _gpp_gc_diag,
                         _lai_col,
@@ -5934,8 +6392,12 @@ def run_regional_pass(
                 )
                 if _daily_diag_sum is None:
                     _daily_diag_sum = _daily_stack.clone()
+                    _daily_elm_h0_tsoi_sum = _t_soil_all_layers.clone()
+                    _daily_elm_h0_h2osoi_sum = _h2osoi_vol_all_layers.clone()
                 else:
                     _daily_diag_sum.add_(_daily_stack)
+                    _daily_elm_h0_tsoi_sum.add_(_t_soil_all_layers)
+                    _daily_elm_h0_h2osoi_sum.add_(_h2osoi_vol_all_layers)
                 _daily_diag_count += 1
                 if record_day_night_flux_maps:
                     _day_weight = (_fsds_diag > float(day_night_fsds_threshold)).to(dtype=dtype)
@@ -5962,6 +6424,22 @@ def run_regional_pass(
                 if (step_i % 24 == 23) or ((step_i + 1) == n1h):
                     _daily_mean = _daily_diag_sum / max(_daily_diag_count, 1)
                     _daily_diag_rows.append(_daily_mean.detach().cpu().numpy().astype(np.float32, copy=False))
+                    if _daily_elm_h0_tsoi_sum is not None:
+                        _daily_elm_h0_tsoi_rows.append(
+                            (_daily_elm_h0_tsoi_sum / max(_daily_diag_count, 1))
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
+                    if _daily_elm_h0_h2osoi_sum is not None:
+                        _daily_elm_h0_h2osoi_rows.append(
+                            (_daily_elm_h0_h2osoi_sum / max(_daily_diag_count, 1))
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
                     if record_day_night_flux_maps and _daily_day_count_sum is not None:
                         _day_count = _daily_day_count_sum
                         _night_count = (
@@ -6022,6 +6500,14 @@ def run_regional_pass(
                             .numpy()
                             .astype(np.float32, copy=False)
                         )
+                    for _key, _value_sum in _daily_shortwave_sum.items():
+                        _daily_shortwave_rows.setdefault(_key, []).append(
+                            (_value_sum / max(_daily_diag_count, 1))
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
                     _daily_diag_sum = None
                     _daily_day_count_sum = None
                     _daily_night_count_sum = None
@@ -6030,6 +6516,9 @@ def run_regional_pass(
                     _daily_fpsn_ens_sum = None
                     _daily_runoff_ens_sum = None
                     _daily_trait_std_sum.clear()
+                    _daily_shortwave_sum.clear()
+                    _daily_elm_h0_tsoi_sum = None
+                    _daily_elm_h0_h2osoi_sum = None
                     _daily_diag_count = 0
 
         if progress_stride > 0 and ((step_i + 1) % progress_stride == 0 or (step_i + 1) == n1h):
@@ -6073,6 +6562,11 @@ def run_regional_pass(
         sanity[f"clip_{_name}"] = float(_value.detach().cpu())
     if _acc_n > 0 and _acc_forc_t is not None:
         diag_maps["forc_t_mean"] = (_acc_forc_t / _acc_n).cpu().numpy()  # (ncell,)
+        diag_maps["forc_q_mean"] = (_acc_forc_q / _acc_n).cpu().numpy()  # (ncell,)
+        diag_maps["forc_pbot_mean"] = (_acc_forc_pbot / _acc_n).cpu().numpy()  # (ncell,)
+        diag_maps["forc_lwrad_mean"] = (_acc_forc_lwrad / _acc_n).cpu().numpy()  # (ncell,)
+        diag_maps["forc_wind_mean"] = (_acc_forc_wind / _acc_n).cpu().numpy()  # (ncell,)
+        diag_maps["rh2m_mean"] = (_acc_rh2m / _acc_n).cpu().numpy()  # (ncell,)
         diag_maps["forc_rain_mean"] = (_acc_forc_rain / _acc_n).cpu().numpy()  # (ncell,)
         diag_maps["forc_snow_mean"] = (_acc_forc_snow / _acc_n).cpu().numpy()  # (ncell,)
         diag_maps["fsds_mean"] = (_acc_fsds / _acc_n).cpu().numpy()  # (ncell,)
@@ -6087,6 +6581,22 @@ def run_regional_pass(
             diag_maps["t_soisno_lev1_mean"] = _t_soil_layers_mean[:, 0]
             diag_maps["t_soisno_lev3_mean"] = _t_soil_layers_mean[:, 1]
             diag_maps["t_soisno_lev5_mean"] = _t_soil_layers_mean[:, 2]
+        if _acc_elm_h0_tsoi is not None:
+            diag_maps["elm_h0_TSOI"] = (_acc_elm_h0_tsoi / _acc_n).cpu().numpy()
+        if _acc_elm_h0_h2osoi is not None:
+            diag_maps["elm_h0_H2OSOI"] = (_acc_elm_h0_h2osoi / _acc_n).cpu().numpy()
+        if _acc_tg is not None:
+            diag_maps["tg_mean"] = (_acc_tg / _acc_n).cpu().numpy()
+        if _acc_fgr is not None:
+            diag_maps["eflx_fgr12_mean"] = (_acc_fgr / _acc_n).cpu().numpy()
+        if _acc_hs_soil is not None:
+            diag_maps["hs_soil_mean"] = (_acc_hs_soil / _acc_n).cpu().numpy()
+        if _acc_hs_top_snow is not None:
+            diag_maps["hs_top_snow_mean"] = (_acc_hs_top_snow / _acc_n).cpu().numpy()
+        if _acc_hs_h2osfc is not None:
+            diag_maps["hs_h2osfc_mean"] = (_acc_hs_h2osfc / _acc_n).cpu().numpy()
+        if _acc_dhsdT is not None:
+            diag_maps["dhsdT_mean"] = (_acc_dhsdT / _acc_n).cpu().numpy()
         diag_maps["t_veg_mean"] = (_acc_t_veg / _acc_n).cpu().numpy()  # (ncell,)
         diag_maps["liq_mean"]    = (_acc_liq    / _acc_n).cpu().numpy()  # (ncell,)
         if _acc_liq_layers is not None:
@@ -6140,6 +6650,8 @@ def run_regional_pass(
             diag_maps["active_snow_depth_mean"] = (_acc_active_snow_depth / _acc_n).cpu().numpy()  # (ncell,)
         if _acc_snow_depth_eff is not None:
             diag_maps["snow_depth_eff_mean"] = (_acc_snow_depth_eff / _acc_n).cpu().numpy()  # (ncell,)
+        for _key, _acc_value in _acc_shortwave_diag.items():
+            diag_maps[_key] = (_acc_value / _acc_n).cpu().numpy()
         for _key, _acc_value in _acc_trait_std.items():
             diag_maps[_key] = (_acc_value / _acc_n).cpu().numpy()  # (ncell,)
         if _acc_ood_n > 0 and _acc_ood_max_z is not None and _acc_ood_frac is not None:
@@ -6156,6 +6668,12 @@ def run_regional_pass(
         ):
             if _key in surf:
                 diag_maps[_key] = np.asarray(surf[_key], dtype=np.float32)
+    if _hourly_h0_rows:
+        diag_maps["_hourly"] = {
+            key: np.stack(rows, axis=0).astype(np.float32, copy=False)
+            for key, rows in _hourly_h0_rows.items()
+            if rows
+        }
     if _daily_diag_rows:
         daily_stack = np.stack(_daily_diag_rows, axis=1)  # (nvar, nday, ncell)
         if daily_stack.shape[0] != len(_REGIONAL_DAILY_DIAG_KEYS):
@@ -6168,6 +6686,20 @@ def run_regional_pass(
             key: daily_stack[idx]
             for idx, key in enumerate(_REGIONAL_DAILY_DIAG_KEYS)
         }
+        if _daily_elm_h0_tsoi_rows:
+            elm_h0_tsoi_daily = np.stack(_daily_elm_h0_tsoi_rows, axis=0).astype(
+                np.float32,
+                copy=False,
+            )
+            if elm_h0_tsoi_daily.shape[0] == daily_stack.shape[1]:
+                diag_maps["_daily"]["elm_h0_TSOI"] = elm_h0_tsoi_daily
+        if _daily_elm_h0_h2osoi_rows:
+            elm_h0_h2osoi_daily = np.stack(_daily_elm_h0_h2osoi_rows, axis=0).astype(
+                np.float32,
+                copy=False,
+            )
+            if elm_h0_h2osoi_daily.shape[0] == daily_stack.shape[1]:
+                diag_maps["_daily"]["elm_h0_H2OSOI"] = elm_h0_h2osoi_daily
         if _daily_fpsn_ens_rows:
             fpsn_ens_std_daily = np.stack(_daily_fpsn_ens_rows, axis=0)
             if fpsn_ens_std_daily.shape[0] == daily_stack.shape[1]:
@@ -6180,6 +6712,10 @@ def run_regional_pass(
             trait_std_daily = np.stack(rows, axis=0)
             if trait_std_daily.shape[0] == daily_stack.shape[1]:
                 diag_maps["_daily"][key] = trait_std_daily
+        for key, rows in _daily_shortwave_rows.items():
+            shortwave_daily = np.stack(rows, axis=0).astype(np.float32, copy=False)
+            if shortwave_daily.shape[0] == daily_stack.shape[1]:
+                diag_maps["_daily"][key] = shortwave_daily
         for key, rows in _daily_day_night_rows.items():
             split_values = np.stack(rows, axis=0).astype(np.float32, copy=False)
             if split_values.shape[0] == daily_stack.shape[1]:
@@ -7021,6 +7557,16 @@ def parse_args() -> argparse.Namespace:
         help="Regional safety clamp upper bound for psn/fpsn targets [umol m-2 s-1].",
     )
     p.add_argument(
+        "--regional-thermal-target-z-clamp",
+        type=float,
+        default=3.0,
+        help=(
+            "Regional safety clamp for learned thermal boundary targets "
+            "(hs_soil, hs_top_snow, hs_h2osfc), expressed as training "
+            "standard deviations around the model target mean. Use <=0 to disable."
+        ),
+    )
+    p.add_argument(
         "--regional-ood-stride",
         type=int,
         default=0,
@@ -7062,6 +7608,37 @@ def parse_args() -> argparse.Namespace:
             "Frequency for --regional-daily-output records. '5day' writes "
             "5-day period means with a final partial period as needed; "
             "'monthly' writes one time record per simulated month."
+        ),
+    )
+    p.add_argument(
+        "--elm-history-output-dir",
+        "--elm-history-run-dir",
+        dest="elm_history_output_dir",
+        type=Path,
+        default=None,
+        help=(
+            "Regional mode: write ELM-style .elm.h0.<year>-01-01-00000.nc "
+            "history files into this run directory. This is intended for "
+            "elm-olmt integration and comparison against native ELM h0 files."
+        ),
+    )
+    p.add_argument(
+        "--elm-history-case",
+        default=None,
+        help=(
+            "Case name used in ELM-style h0 filenames. Default: infer from "
+            "--elm-history-output-dir, using the parent directory when the "
+            "output directory is named 'run'."
+        ),
+    )
+    p.add_argument(
+        "--elm-history-frequency",
+        choices=("hourly", "daily", "5day", "monthly"),
+        default="monthly",
+        help=(
+            "Averaging frequency for ELM-style h0 output. Monthly is the most "
+            "compact; hourly writes one record per replay hour; daily and 5day "
+            "use the daily diagnostic path."
         ),
     )
     p.add_argument(
@@ -7113,8 +7690,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--co2-ppm",
         type=float,
-        default=_CO2_PPM_1980,
-        help="Atmospheric CO2 concentration in ppm (for forc_pco2).",
+        default=None,
+        help=(
+            "Scalar atmospheric CO2 concentration in ppm, used only when no "
+            "--co2-file/default CO2 stream is available."
+        ),
+    )
+    p.add_argument(
+        "--co2-file",
+        type=Path,
+        default=None,
+        help=(
+            "NetCDF CO2 stream file with a CO2 variable in ppmv. Default: infer "
+            "the OLMT/E3SM cpl-bypass CO2 file from the inputdata root containing --met-dir."
+        ),
     )
     p.add_argument(
         "--online-carbon",
@@ -7167,6 +7756,10 @@ def parse_args() -> argparse.Namespace:
         )
     if args.universal and not args.regional:
         raise SystemExit("--universal is currently supported only with --regional")
+    if args.elm_history_output_dir is not None and not args.regional:
+        raise SystemExit("--elm-history-output-dir is currently supported only with --regional")
+    if args.elm_history_output_dir is not None and args.elm_history_case is None:
+        args.elm_history_case = infer_elm_history_case_name(args.elm_history_output_dir)
     if args.regional_met_cycle_years < 0:
         raise SystemExit("--regional-met-cycle-years must be non-negative")
     if args.regional_met_cycle_years > 0 and args.regional_met_cycle_start_year is None:
@@ -7255,6 +7848,8 @@ def _run_regional_benchmark(
         met_input_step_hours = 1
     else:
         met_input_step_hours = 3
+    met_padding_steps = 1 if regional_met_format == "trendy" and met_input_step_hours > 1 else 0
+    elm_stream_met_methods = regional_met_format == "trendy"
 
     # ------------------------------------------------------------------
     # 1. Load regional surfdata (active cells only).
@@ -7919,7 +8514,13 @@ def _run_regional_benchmark(
             _record_ts_value("hour_of_day", step_i % 24)
             _record_ts_value(
                 "physics_step",
-                1 if ((step_i + 1) % physics_cadence_ts == 0 or (step_i + 1) == len(met_dev) * 3) else 0,
+                1
+                if (
+                    (step_i + 1) % physics_cadence_ts == 0
+                    or (step_i + 1)
+                    == (max(len(met_dev) - 2 * int(met_padding_steps), 0) * int(met_input_step_hours))
+                )
+                else 0,
             )
             _record_ts_value("fpsn_patch", blended["fpsn_patch"])
             _record_ts_value("qflx_tran_veg", blended["qflx_tran_veg"])
@@ -8061,6 +8662,29 @@ def _run_regional_benchmark(
         _ym_list.append((_y, _m))
         _y, _m = _next_ym(_y, _m)
 
+    co2_file = _resolve_regional_co2_file(args.co2_file, args.met_dir)
+    co2_scalar = None
+    if co2_file is not None:
+        if not co2_file.exists():
+            raise SystemExit(f"CO2 file not found: {co2_file}")
+        _load_co2_file_series(co2_file)
+        print(f"  CO2 forcing: {co2_file}")
+    elif args.co2_ppm is not None:
+        co2_scalar = float(args.co2_ppm)
+        print(f"  CO2 forcing: scalar {co2_scalar:.6g} ppm")
+    else:
+        co2_scalar = float(_CO2_PPM_FALLBACK)
+        print(
+            "  CO2 forcing: no CO2 stream found from --met-dir; "
+            f"using fallback scalar {co2_scalar:.6g} ppm"
+        )
+
+    def _co2_ppm_for_ym(y: int, m: int, *, calendar: str) -> float:
+        if co2_file is not None:
+            return _co2_ppm_from_file(co2_file, int(y), int(m), calendar=calendar)
+        assert co2_scalar is not None
+        return float(co2_scalar)
+
     met_cycle_years = int(args.regional_met_cycle_years)
     met_cycle_start_year = (
         int(args.regional_met_cycle_start_year)
@@ -8116,8 +8740,15 @@ def _run_regional_benchmark(
             met_index=surf.get("met_index"),
             met_format=regional_met_format,
             calendar=args.regional_calendar,
+            pad_steps=met_padding_steps,
         )
-        n1h_expected = int(met.shape[0]) * int(met_input_step_hours)
+        core_met_steps = int(met.shape[0]) - 2 * int(met_padding_steps)
+        if core_met_steps <= 0:
+            raise ValueError(
+                f"{regional_met_format} met load for {y}-{m:02d} returned {met.shape[0]} "
+                f"steps, too few for padding={met_padding_steps}"
+            )
+        n1h_expected = core_met_steps * int(met_input_step_hours)
         calendar_for_precompute = args.regional_calendar
         expected_days = _days_in_month(met_y, m, calendar_for_precompute)
         actual_days = n1h_expected / 24.0
@@ -8180,6 +8811,159 @@ def _run_regional_benchmark(
     _regional_output_written = False
     _five_day_pending_diag: dict[str, np.ndarray] = {}
     _five_day_pending_dates: list[tuple[int, int, int]] = []
+    elm_history_writer = (
+        ElmHistoryWriter(
+            args.elm_history_output_dir,
+            case_name=str(args.elm_history_case),
+            calendar=args.regional_calendar,
+            surface_dataset=args.regional_surfdata,
+            clm_params=args.clm_params,
+        )
+        if args.elm_history_output_dir is not None
+        else None
+    )
+    _elm_h0_pending_diag: dict[str, np.ndarray] = {}
+    _elm_h0_pending_dates: list[tuple[int, int, int]] = []
+    if elm_history_writer is not None:
+        print(
+            "  ELM-style h0 output: "
+            f"{args.elm_history_output_dir}  case={args.elm_history_case}  "
+            f"frequency={args.elm_history_frequency}"
+        )
+
+    def _period_index_for_daily(year: int, month: int, nday_local: int) -> list[tuple[int, int, int, int]]:
+        return [
+            (int(year), int(month), int(day), 1)
+            for day in range(1, int(nday_local) + 1)
+        ]
+
+    def _period_index_for_hourly(year: int, month: int, nhour_local: int) -> list[tuple[int, int, int, int, int]]:
+        return [
+            (
+                int(year),
+                int(month),
+                int(hour_i // 24 + 1),
+                int((hour_i % 24) * 3600),
+                3600,
+            )
+            for hour_i in range(int(nhour_local))
+        ]
+
+    def _write_elm_h0_records(
+        diag: dict[str, np.ndarray],
+        *,
+        period_index: list[tuple],
+    ) -> None:
+        if elm_history_writer is None or not diag or not period_index:
+            return
+        t_write = time.perf_counter()
+        paths = elm_history_writer.write(
+            surf=surf,
+            diag=diag,
+            period_index=period_index,
+        )
+        if paths:
+            path_text = ", ".join(str(path) for path in paths)
+            print(f"    ELM h0 write: {time.perf_counter() - t_write:.2f}s  {path_text}")
+
+    def _flush_elm_h0_five_day_pending(*, final: bool = False) -> None:
+        nonlocal _elm_h0_pending_diag, _elm_h0_pending_dates
+        if elm_history_writer is None or not _elm_h0_pending_dates:
+            return
+        total_days = len(_elm_h0_pending_dates)
+        n_groups = total_days // 5
+        if final and total_days % 5:
+            n_groups += 1
+        if n_groups <= 0:
+            return
+
+        period_index: list[tuple[int, int, int, int]] = []
+        rows: dict[str, list[np.ndarray]] = {key: [] for key in _elm_h0_pending_diag}
+        used_days = 0
+        for group_idx in range(n_groups):
+            start_day = group_idx * 5
+            end_day = min(start_day + 5, total_days)
+            start_year, start_month, start_month_day = _elm_h0_pending_dates[start_day]
+            period_index.append((
+                int(start_year),
+                int(start_month),
+                int(start_month_day),
+                int(end_day - start_day),
+            ))
+            for key, arr in _elm_h0_pending_diag.items():
+                rows[key].append(np.nanmean(arr[start_day:end_day], axis=0))
+            used_days = end_day
+
+        output_diag = {
+            key: np.stack(value, axis=0).astype(np.float32, copy=False)
+            for key, value in rows.items()
+            if value
+        }
+        _write_elm_h0_records(output_diag, period_index=period_index)
+
+        if used_days >= total_days:
+            _elm_h0_pending_dates = []
+            _elm_h0_pending_diag = {
+                key: arr[:0]
+                for key, arr in _elm_h0_pending_diag.items()
+            }
+        else:
+            _elm_h0_pending_dates = _elm_h0_pending_dates[used_days:]
+            _elm_h0_pending_diag = {
+                key: arr[used_days:]
+                for key, arr in _elm_h0_pending_diag.items()
+            }
+
+    def _accumulate_elm_h0_five_day(
+        daily_diag: dict[str, np.ndarray],
+        *,
+        year: int,
+        month: int,
+    ) -> None:
+        nonlocal _elm_h0_pending_diag, _elm_h0_pending_dates
+        if elm_history_writer is None or not daily_diag:
+            return
+        incoming = {
+            key: np.asarray(value, dtype=np.float32)
+            for key, value in daily_diag.items()
+            if not key.startswith("mlp_ood_abs_z_")
+        }
+        if not incoming:
+            return
+        nday_local = int(next(iter(incoming.values())).shape[0])
+        if nday_local <= 0:
+            return
+        pending_len = len(_elm_h0_pending_dates)
+        month_dates = [
+            (int(year), int(month), int(day))
+            for day in range(1, nday_local + 1)
+        ]
+        for key, arr in incoming.items():
+            if arr.shape[0] != nday_local:
+                raise ValueError(
+                    f"{key} h0 daily diagnostics have {arr.shape[0]} records, "
+                    f"expected {nday_local}"
+                )
+            if key not in _elm_h0_pending_diag:
+                _elm_h0_pending_diag[key] = np.full(
+                    (pending_len, *arr.shape[1:]),
+                    np.nan,
+                    dtype=np.float32,
+                )
+        for key in tuple(_elm_h0_pending_diag):
+            arr = incoming.get(key)
+            if arr is None:
+                arr = np.full(
+                    (nday_local, *_elm_h0_pending_diag[key].shape[1:]),
+                    np.nan,
+                    dtype=np.float32,
+                )
+            _elm_h0_pending_diag[key] = np.concatenate(
+                (_elm_h0_pending_diag[key], arr),
+                axis=0,
+            )
+        _elm_h0_pending_dates.extend(month_dates)
+        _flush_elm_h0_five_day_pending(final=False)
 
     def _flush_five_day_pending(*, final: bool = False) -> None:
         nonlocal _regional_output_written, _five_day_pending_diag, _five_day_pending_dates
@@ -8340,6 +9124,9 @@ def _run_regional_benchmark(
             )
         ):
             precip_multiplier_this_month = surf.get("precip_treatment_multiplier")
+        co2_ppm_this_month = _co2_ppm_for_ym(year, month, calendar=run_calendar)
+        if m_idx == 0 or month == 1:
+            print(f"  {year}-{month:02d}:  CO2 {co2_ppm_this_month:.3f} ppm")
         # Transfer current month to device.
         t_xfer = time.perf_counter()
         met_dev = torch.as_tensor(met_cpu, device=device, dtype=dtype)
@@ -8349,7 +9136,9 @@ def _run_regional_benchmark(
         print(f"  {year}-{month:02d}:  GPU transfer {t_ready - t_xfer:.2f}s")
         soil_temperature_override = None
         if args.regional_soil_temp_override_elm_history is not None:
-            n1h_override = int(met_cpu.shape[0]) * int(met_input_step_hours)
+            n1h_override = (
+                int(met_cpu.shape[0]) - 2 * int(met_padding_steps)
+            ) * int(met_input_step_hours)
             if args.regional_max_hours is not None:
                 n1h_override = min(n1h_override, int(args.regional_max_hours))
             t_override_start = time.perf_counter()
@@ -8368,7 +9157,9 @@ def _run_regional_benchmark(
             )
         ground_heat_flux_override = None
         if args.regional_ground_heat_override_elm_history is not None:
-            n1h_override = int(met_cpu.shape[0]) * int(met_input_step_hours)
+            n1h_override = (
+                int(met_cpu.shape[0]) - 2 * int(met_padding_steps)
+            ) * int(met_input_step_hours)
             if args.regional_max_hours is not None:
                 n1h_override = min(n1h_override, int(args.regional_max_hours))
             t_override_start = time.perf_counter()
@@ -8399,6 +9190,8 @@ def _run_regional_benchmark(
             year=year,
             month=month,
             met_input_step_hours=met_input_step_hours,
+            met_padding_steps=met_padding_steps,
+            elm_stream_met_methods=elm_stream_met_methods,
             calendar=run_calendar,
             dt=3600.0,
             device=device,
@@ -8408,7 +9201,7 @@ def _run_regional_benchmark(
             soil_temperature_backend=args.soil_temperature_backend,
             snow_model_enabled=snow_model_enabled,
             snow_scalar_only=args.snow_scalar_only,
-            co2_ppm=args.co2_ppm,
+            co2_ppm=co2_ppm_this_month,
             initial_state=state,
             precomputed=precomputed_cpu,
             profile_sections=_prof,
@@ -8426,10 +9219,24 @@ def _run_regional_benchmark(
                     args.regional_daily_output is not None
                     and args.regional_output_frequency == "monthly"
                 )
+                or (
+                    elm_history_writer is not None
+                    and args.elm_history_frequency == "monthly"
+                )
             ),
             record_daily_diag_maps=(
-                args.regional_daily_output is not None
-                and args.regional_output_frequency in {"daily", "5day"}
+                (
+                    args.regional_daily_output is not None
+                    and args.regional_output_frequency in {"daily", "5day"}
+                )
+                or (
+                    elm_history_writer is not None
+                    and args.elm_history_frequency in {"daily", "5day"}
+                )
+            ),
+            record_hourly_diag_maps=(
+                elm_history_writer is not None
+                and args.elm_history_frequency == "hourly"
             ),
             record_day_night_flux_maps=(
                 args.regional_day_night_flux_output
@@ -8441,6 +9248,7 @@ def _run_regional_benchmark(
             temperature_min_k=args.regional_temperature_min_k,
             temperature_max_k=args.regional_temperature_max_k,
             photosynthesis_max=args.regional_photosynthesis_max,
+            thermal_target_z_clamp=args.regional_thermal_target_z_clamp,
             physics_step_hours=args.regional_physics_step_hours,
             universal_mlp_batch=args.universal,
             sparse_universal_mlp_batch=args.regional_sparse_pft_batch,
@@ -8560,6 +9368,7 @@ def _run_regional_benchmark(
             torch.cuda.empty_cache()
 
         daily_diag_maps = diag_maps.pop("_daily", None)
+        hourly_diag_maps = diag_maps.pop("_hourly", None)
         monthly_diag_maps = diag_maps.pop("_monthly", None)
         output_diag_maps = None
         if args.regional_daily_output is not None:
@@ -8601,6 +9410,60 @@ def _run_regional_benchmark(
                 )
                 _regional_output_written = True
                 print(f"    regional output write: {time.perf_counter() - _t_write:.2f}s")
+
+        if elm_history_writer is not None:
+            if args.elm_history_frequency == "hourly":
+                if hourly_diag_maps:
+                    _write_elm_h0_records(
+                        hourly_diag_maps,
+                        period_index=_period_index_for_hourly(
+                            year,
+                            month,
+                            int(next(iter(hourly_diag_maps.values())).shape[0]),
+                        ),
+                    )
+            elif args.elm_history_frequency == "daily":
+                if daily_diag_maps:
+                    _write_elm_h0_records(
+                        daily_diag_maps,
+                        period_index=_period_index_for_daily(
+                            year,
+                            month,
+                            int(next(iter(daily_diag_maps.values())).shape[0]),
+                        ),
+                    )
+            elif args.elm_history_frequency == "5day":
+                if daily_diag_maps:
+                    _accumulate_elm_h0_five_day(
+                        daily_diag_maps,
+                        year=year,
+                        month=month,
+                    )
+            else:
+                h0_monthly_diag: dict[str, np.ndarray] = {}
+                for _key, _value in diag_maps.items():
+                    _arr = np.asarray(_value, dtype=np.float32)
+                    if _arr.ndim == 1 and _arr.shape == (ncell,):
+                        h0_monthly_diag[_key] = _arr[None, :]
+                    elif _key in {"elm_h0_TSOI", "elm_h0_H2OSOI"} and _arr.ndim == 2 and _arr.shape[0] == ncell:
+                        h0_monthly_diag[_key] = _arr[None, :, :]
+                    elif _key in {"albgrd_mean", "albgri_mean", "albd_mean", "albi_mean"} and _arr.shape == (ncell, 2):
+                        h0_monthly_diag[_key] = _arr[None, :, :]
+                if monthly_diag_maps:
+                    for _key, _value in monthly_diag_maps.items():
+                        _arr = np.asarray(_value, dtype=np.float32)
+                        if _arr.shape[0] == 1:
+                            h0_monthly_diag[_key] = _arr
+                if h0_monthly_diag:
+                    _write_elm_h0_records(
+                        h0_monthly_diag,
+                        period_index=[(
+                            int(year),
+                            int(month),
+                            1,
+                            int(_days_in_month(year, month, run_calendar)),
+                        )],
+                    )
 
         if not args.no_plot and not single_cell_mode:
             plot_diag_maps = _filter_regional_plot_diag_maps(
@@ -8656,6 +9519,8 @@ def _run_regional_benchmark(
 
     if args.regional_daily_output is not None and args.regional_output_frequency == "5day":
         _flush_five_day_pending(final=True)
+    if elm_history_writer is not None and args.elm_history_frequency == "5day":
+        _flush_elm_h0_five_day_pending(final=True)
 
     if _executor is not None:
         _executor.shutdown(wait=False)

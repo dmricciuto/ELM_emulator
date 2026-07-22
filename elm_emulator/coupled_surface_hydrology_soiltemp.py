@@ -838,11 +838,14 @@ NONNEGATIVE_SURFACE_TARGETS = {
     "psnsun_patch",
     "psnsha_patch",
     "qflx_tran_veg",
+    "qflx_prec_grnd",
+}
+
+SIGNED_EVAPORATION_SURFACE_TARGETS = {
     "qflx_evap_canopy",
     "qflx_ev_soil",
     "qflx_ev_snow",
     "qflx_ev_h2osfc",
-    "qflx_prec_grnd",
 }
 
 LOG1P_SURFACE_TARGETS = {
@@ -864,6 +867,21 @@ PATCH0_ZERO_SURFACE_TARGETS = {
 FPSN_LAI_CUTOFF = 1.0e-2
 ZERO_RADIATION_THRESHOLD = 1.0e-12
 ZERO_BTRAN_THRESHOLD = 1.0e-2
+H2OSFC_ACTIVE_FRACTION_THRESHOLD = 1.0e-8
+
+# The regional replay can drive the top-layer matric potential substantially
+# drier than the surface-energy training support during hot, high-radiation
+# periods. Keep that extrapolation out of the learned energy boundary targets
+# while leaving water-stress and hydrology targets on the original state.
+SURFACE_ENERGY_SMP_L_FEATURE = "smp_l_lev1"
+SURFACE_ENERGY_SMP_L_LOWER_BOUND = -2.3e7
+SURFACE_ENERGY_TARGETS: frozenset[str] = frozenset({
+    "eflx_sh_tot",
+    "hs_soil",
+    "hs_top_snow",
+    "hs_h2osfc",
+    "dhsdT",
+})
 
 # ELM's soil/snow temperature solver expects the surface heat-flux
 # linearization to be stabilizing. The native training targets are strictly
@@ -1895,6 +1913,58 @@ def _apply_patch0_zero_surface_targets(
     return targets
 
 
+def _apply_surface_energy_smp_l_clip_for_targets(
+    bundle: SurfaceModelBundle,
+    x2_scaled: torch.Tensor,
+    y_scaled: torch.Tensor,
+    input_idx_map: Mapping[str, int],
+    *,
+    already_zero_feature_names: set[str] | frozenset[str] | None = None,
+) -> torch.Tensor:
+    """Recompute energy targets with top-layer matric potential clipped.
+
+    The clip is target-specific: the rest of the predicted target vector still
+    sees the raw hydrology state. This avoids corrupting transpiration and other
+    water-stress-sensitive outputs while preventing a rare, strongly negative
+    ``smp_l_lev1`` extrapolation from dominating surface energy targets.
+    """
+    if already_zero_feature_names and SURFACE_ENERGY_SMP_L_FEATURE in already_zero_feature_names:
+        return y_scaled
+    feature_idx = input_idx_map.get(SURFACE_ENERGY_SMP_L_FEATURE)
+    if feature_idx is None:
+        return y_scaled
+    x_std = float(bundle.x_std[feature_idx]) if feature_idx < bundle.x_std.size else 1.0
+    if not np.isfinite(x_std) or x_std <= 0.0:
+        return y_scaled
+
+    # In scaled space, clipping physical smp_l_lev1 to be no more negative than
+    # the lower bound is a lower-bound clamp because x_std is positive.
+    clipped_scaled_value = (SURFACE_ENERGY_SMP_L_LOWER_BOUND - float(bundle.x_mean[feature_idx])) / x_std
+    current = x2_scaled[:, feature_idx]
+    clipped = torch.clamp(
+        current,
+        min=torch.as_tensor(clipped_scaled_value, device=x2_scaled.device, dtype=x2_scaled.dtype),
+    )
+    if not torch.any(clipped != current):
+        return y_scaled
+
+    target_feature_masks = bundle.target_feature_masks or {}
+    target_indices = [
+        idx
+        for idx, target_name in enumerate(bundle.target_names)
+        if target_name in SURFACE_ENERGY_TARGETS and target_name not in target_feature_masks
+    ]
+    if not target_indices:
+        return y_scaled
+
+    x2_clipped = x2_scaled.clone()
+    x2_clipped[:, feature_idx] = clipped
+    y_clipped = bundle.model(x2_clipped)
+    out = y_scaled.clone()
+    out[:, target_indices] = y_clipped[:, target_indices]
+    return out
+
+
 @lru_cache(maxsize=8)
 def _nonneg_target_indices(target_names: tuple[str, ...]) -> np.ndarray:
     return np.array([i for i, n in enumerate(target_names) if n in NONNEGATIVE_SURFACE_TARGETS], dtype=np.intp)
@@ -1920,11 +1990,17 @@ def postprocess_surface_predictions(
         idx = target_idx_map["dhsdT"]
         y_out[..., idx] = np.clip(y_out[..., idx], DHS_DT_MIN, DHS_DT_MAX)
         thermal_flux = None
+        frac_h2osfc = None
+        if surface_features is not None and "frac_h2osfc" in bundle.input_names:
+            frac_idx = bundle.input_names.index("frac_h2osfc")
+            frac_h2osfc = np.asarray(surface_features[..., frac_idx], dtype=np.float64)
         for flux_name in ("hs_soil", "hs_h2osfc", "hs_top_snow"):
             flux_idx = target_idx_map.get(flux_name)
             if flux_idx is None:
                 continue
             flux_abs = np.abs(y_out[..., flux_idx])
+            if flux_name == "hs_h2osfc" and frac_h2osfc is not None:
+                flux_abs = np.where(frac_h2osfc > H2OSFC_ACTIVE_FRACTION_THRESHOLD, flux_abs, 0.0)
             thermal_flux = flux_abs if thermal_flux is None else np.maximum(thermal_flux, flux_abs)
         if thermal_flux is not None:
             required = -thermal_flux / THERMAL_LINEARIZATION_MAX_DELTA_K
@@ -2001,11 +2077,22 @@ def postprocess_surface_predictions_torch(
         idx = target_idx_map["dhsdT"]
         y_out[..., idx] = torch.clamp(y_out[..., idx], min=DHS_DT_MIN, max=DHS_DT_MAX)
         thermal_flux = None
+        frac_h2osfc = None
+        if surface_features is not None:
+            frac_idx = idx_map.get("frac_h2osfc")
+            if frac_idx is not None:
+                frac_h2osfc = surface_features[..., frac_idx]
         for flux_name in ("hs_soil", "hs_h2osfc", "hs_top_snow"):
             flux_idx = target_idx_map.get(flux_name)
             if flux_idx is None:
                 continue
             flux_abs = torch.abs(y_out[..., flux_idx])
+            if flux_name == "hs_h2osfc" and frac_h2osfc is not None:
+                flux_abs = torch.where(
+                    frac_h2osfc > H2OSFC_ACTIVE_FRACTION_THRESHOLD,
+                    flux_abs,
+                    torch.zeros_like(flux_abs),
+                )
             thermal_flux = flux_abs if thermal_flux is None else torch.maximum(thermal_flux, flux_abs)
         if thermal_flux is not None:
             required = -thermal_flux / THERMAL_LINEARIZATION_MAX_DELTA_K
@@ -2739,8 +2826,9 @@ def apply_canopy_evaporation(
         if dtype is None:
             dtype = first.dtype
         h2ocan_old = _to_torch(state.h2ocan, device, dtype)
-        evap_pred = torch.clamp(_to_torch(adjusted_targets.get("qflx_evap_canopy", 0.0), device, dtype), min=0.0)
-        evap = torch.minimum(evap_pred, torch.clamp(h2ocan_old, min=0.0) / dt)
+        evap_pred = _to_torch(adjusted_targets.get("qflx_evap_canopy", 0.0), device, dtype)
+        evap_pos = torch.minimum(torch.clamp(evap_pred, min=0.0), torch.clamp(h2ocan_old, min=0.0) / dt)
+        evap = torch.where(evap_pred > 0.0, evap_pos, evap_pred)
         h2ocan_new = torch.clamp(h2ocan_old - dt * evap, min=0.0)
         adjusted_targets["qflx_evap_canopy"] = evap
         adjusted_state = CoupledColumnState(
@@ -2764,8 +2852,9 @@ def apply_canopy_evaporation(
         return adjusted_targets, adjusted_state
 
     h2ocan_old = _to_np(state.h2ocan)
-    evap_pred = np.maximum(np.asarray(adjusted_targets.get("qflx_evap_canopy", 0.0), dtype=np.float64), 0.0)
-    evap = np.minimum(evap_pred, np.maximum(h2ocan_old, 0.0) / dt)
+    evap_pred = np.asarray(adjusted_targets.get("qflx_evap_canopy", 0.0), dtype=np.float64)
+    evap_pos = np.minimum(np.maximum(evap_pred, 0.0), np.maximum(h2ocan_old, 0.0) / dt)
+    evap = np.where(evap_pred > 0.0, evap_pos, evap_pred)
     h2ocan_new = np.maximum(h2ocan_old - dt * evap, 0.0)
     adjusted_targets["qflx_evap_canopy"] = evap
     adjusted_state = CoupledColumnState(
@@ -5021,13 +5110,11 @@ def update_snow_state(
         forc_snow = qflx_snow_t
         forc_t = _snow_batch_like_torch(features_t[..., idx_map["forc_t"]], snow_shape_t, device=device, dtype=dtype)
         wind_speed = _snow_batch_like_torch(features_t[..., idx_map["wind_speed"]], snow_shape_t, device=device, dtype=dtype)
-        qflx_ev_snow = torch.clamp(
+        qflx_ev_snow = _snow_batch_like_torch(
             _to_torch(surface_targets.get("qflx_ev_snow", 0.0), device, dtype),
-            min=0.0,
-        )
-        qflx_ev_snow = torch.clamp(
-            _snow_batch_like_torch(qflx_ev_snow, snow_shape_t, device=device, dtype=dtype),
-            min=0.0,
+            snow_shape_t,
+            device=device,
+            dtype=dtype,
         )
         snow_old = snow_old_t
         newsnow = torch.clamp(dt * forc_snow, min=0.0)
@@ -5039,10 +5126,15 @@ def update_snow_state(
         frac_sno_prev = torch.clamp(frac_sno_prev, min=0.0, max=1.0)
         qflx_ev_snow_store = qflx_ev_snow * frac_sno_prev
         if dt > 0.0:
-            qflx_ev_snow_store = torch.minimum(
+            qflx_ev_snow_store = torch.where(
+                qflx_ev_snow_store > 0.0,
+                torch.minimum(
+                    qflx_ev_snow_store,
+                    torch.clamp((snow_old + newsnow) / float(dt), min=0.0),
+                ),
                 qflx_ev_snow_store,
-                torch.clamp((snow_old + newsnow) / float(dt), min=0.0),
             )
+        deposition = torch.clamp(-float(dt) * qflx_ev_snow_store, min=0.0)
         snow_new = torch.clamp(snow_old + newsnow - float(dt) * qflx_ev_snow_store, min=0.0)
         n_melt = _snow_n_melt_torch(static, snow_shape_t, device=device, dtype=dtype)
         int_snow_prev = (
@@ -5087,9 +5179,10 @@ def update_snow_state(
             else snow_depth_from_storage_torch(snow_old, device=device, dtype=dtype)
         )
         fresh_density = _new_snow_bulk_density_torch(forc_t, wind_speed)
+        snow_mass_gain = newsnow + deposition
         snow_depth_gain = torch.minimum(
-            newsnow / torch.clamp(fresh_density * torch.clamp(frac_sno_new, min=1.0e-12), min=1.0e-12),
-            newsnow / SNOW_GEOMETRY_MIN_DENSITY,
+            snow_mass_gain / torch.clamp(fresh_density * torch.clamp(frac_sno_new, min=1.0e-12), min=1.0e-12),
+            snow_mass_gain / SNOW_GEOMETRY_MIN_DENSITY,
         )
         snow_depth_new = torch.where(
             snow_old > 0.0,
@@ -5116,7 +5209,7 @@ def update_snow_state(
             rds_prev = getattr(prev_layers, "snw_rds", None)
             rds = torch.as_tensor(rds_prev, device=device, dtype=dtype).clone() if rds_prev is not None else None
             active = snl < 0
-            gain = torch.where(active, newsnow, torch.zeros_like(newsnow))
+            gain = torch.where(active, newsnow + deposition, torch.zeros_like(newsnow))
             evap = torch.where(active, torch.clamp(float(dt) * qflx_ev_snow_store, min=0.0), torch.zeros_like(newsnow))
             top_mass0 = torch.clamp(ice[..., 0] + liq[..., 0], min=0.0)
             frac_prev_eff = torch.clamp(frac_sno_prev, min=1.0e-12, max=1.0)
@@ -5244,11 +5337,11 @@ def update_snow_state(
         np.asarray(surface_targets.get("qflx_snow_grnd", features_np[..., fidx["forc_snow"]]), dtype=np.float64),
         0.0,
     )
-    qflx_ev_snow = np.maximum(np.asarray(surface_targets.get("qflx_ev_snow", 0.0), dtype=np.float64), 0.0)
+    qflx_ev_snow = np.asarray(surface_targets.get("qflx_ev_snow", 0.0), dtype=np.float64)
     snow_old = np.asarray(snow_storage_from_state(state), dtype=np.float64)
     snow_shape = snow_old.shape
     forc_snow = np.maximum(_snow_batch_like_numpy(forc_snow, snow_shape), 0.0)
-    qflx_ev_snow = np.maximum(_snow_batch_like_numpy(qflx_ev_snow, snow_shape), 0.0)
+    qflx_ev_snow = _snow_batch_like_numpy(qflx_ev_snow, snow_shape)
     forc_t = _snow_batch_like_numpy(features_np[..., idx_map["forc_t"]], snow_shape)
     wind_speed = _snow_batch_like_numpy(features_np[..., idx_map["wind_speed"]], snow_shape)
     newsnow = np.maximum(dt * forc_snow, 0.0)
@@ -5260,7 +5353,12 @@ def update_snow_state(
     frac_sno_prev = np.clip(frac_sno_prev, 0.0, 1.0)
     qflx_ev_snow_store = qflx_ev_snow * frac_sno_prev
     if dt > 0.0:
-        qflx_ev_snow_store = np.minimum(qflx_ev_snow_store, np.maximum((snow_old + newsnow) / float(dt), 0.0))
+        qflx_ev_snow_store = np.where(
+            qflx_ev_snow_store > 0.0,
+            np.minimum(qflx_ev_snow_store, np.maximum((snow_old + newsnow) / float(dt), 0.0)),
+            qflx_ev_snow_store,
+        )
+    deposition = np.maximum(-float(dt) * qflx_ev_snow_store, 0.0)
     snow_new = np.maximum(snow_old + newsnow - float(dt) * qflx_ev_snow_store, 0.0)
     n_melt = _snow_n_melt_numpy(static, snow_old.shape)
     int_snow_prev = (
@@ -5296,9 +5394,10 @@ def update_snow_state(
         if state.snow_depth is not None
         else snow_depth_from_storage(snow_old)
     )
+    snow_mass_gain = newsnow + deposition
     snow_depth_gain = np.minimum(
-        newsnow / np.maximum(fresh_density0 * np.maximum(frac_sno_new, 1.0e-12), 1.0e-12),
-        newsnow / SNOW_GEOMETRY_MIN_DENSITY,
+        snow_mass_gain / np.maximum(fresh_density0 * np.maximum(frac_sno_new, 1.0e-12), 1.0e-12),
+        snow_mass_gain / SNOW_GEOMETRY_MIN_DENSITY,
     )
     snow_depth_new = np.where(
         snow_old > 0.0,
@@ -5346,7 +5445,7 @@ def update_snow_state(
         # the top-layer thickness so accumulated mass increases snow depth
         # (previously we only increased ice mass which inflated density
         # without changing depth).
-        _gain = np.where(_active, newsnow, 0.0)
+        _gain = np.where(_active, newsnow + deposition, 0.0)
         _evap = np.where(_active, np.maximum(float(dt) * qflx_ev_snow_store, 0.0), 0.0)
         _top_mass0 = np.maximum(_ice[..., 0] + _liq[..., 0], 0.0)
         _frac_prev = np.clip(frac_sno_prev, 1.0e-12, 1.0)
@@ -5983,6 +6082,241 @@ def _elm_twostream_transmission_torch(
     ftid = torch.where(torch.isfinite(ftid), ftid, torch.zeros_like(ftid))
     ftii = torch.where(torch.isfinite(ftii), ftii, torch.ones_like(ftii))
     return ftdd, ftid, ftii
+
+
+def surface_shortwave_diagnostics_torch(
+    forc_swrad: np.ndarray | torch.Tensor,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    elai: np.ndarray | torch.Tensor,
+    esai: np.ndarray | torch.Tensor,
+    atmosphere: "AtmosphericForcingInputs",
+    soil_color: np.ndarray | torch.Tensor | float | None,
+    h2osoi_vol_top: np.ndarray | torch.Tensor | float | None,
+    frac_sno: np.ndarray | torch.Tensor | None = None,
+    snow_albedo: tuple[torch.Tensor, torch.Tensor] | None = None,
+    rholvis: np.ndarray | torch.Tensor | float,
+    rholnir: np.ndarray | torch.Tensor | float,
+    taulvis: np.ndarray | torch.Tensor | float,
+    taulnir: np.ndarray | torch.Tensor | float,
+    rhosvis: np.ndarray | torch.Tensor | float,
+    rhosnir: np.ndarray | torch.Tensor | float,
+    tausvis: np.ndarray | torch.Tensor | float,
+    tausnir: np.ndarray | torch.Tensor | float,
+    xl: np.ndarray | torch.Tensor | float,
+) -> dict[str, torch.Tensor]:
+    """Return ELM-style VIS/NIR direct/diffuse shortwave diagnostics.
+
+    The reflected flux fields follow native history naming: ``FSRVD`` is
+    direct visible reflected shortwave, ``FSRVI`` diffuse visible, ``FSRND``
+    direct NIR, and ``FSRNI`` diffuse NIR. ``ALBD``/``ALBI`` are the surface
+    direct/diffuse albedos with the last dimension ordered VIS, NIR.
+    """
+    forc_swrad_t = torch.clamp(_to_torch(forc_swrad, device, dtype), min=0.0)
+    soil_albedo = _elm_soil_albedo_from_color_torch(
+        soil_color,
+        h2osoi_vol_top,
+        device=device,
+        dtype=dtype,
+    )
+    if soil_albedo is None:
+        alb_ground_vis = torch.full_like(forc_swrad_t, 0.15)
+        alb_ground_nir = torch.full_like(forc_swrad_t, 0.30)
+    else:
+        alb_soil_vis, alb_soil_nir = soil_albedo
+        if frac_sno is not None and snow_albedo is not None:
+            snow_vis, snow_nir = snow_albedo
+            frac = torch.clamp(_to_torch(frac_sno, device, dtype), min=0.0, max=1.0)
+            alb_ground_vis = alb_soil_vis * (1.0 - frac) + snow_vis * frac
+            alb_ground_nir = alb_soil_nir * (1.0 - frac) + snow_nir * frac
+        else:
+            alb_ground_vis = alb_soil_vis
+            alb_ground_nir = alb_soil_nir
+
+    elai_t = _to_torch(elai, device, dtype)
+    esai_t = _to_torch(esai, device, dtype)
+    coszen = _to_torch(atmosphere.coszen_col, device, dtype)
+    xl_t = _to_torch(xl, device, dtype)
+
+    def _band_albedo_transmission(
+        rho: torch.Tensor,
+        tau: torch.Tensor,
+        albgrd: torch.Tensor,
+        albgri: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        eps = torch.as_tensor(1.0e-8, device=device, dtype=dtype)
+        laisum = torch.clamp(elai_t, min=0.0) + torch.clamp(esai_t, min=0.0)
+        coszen_raw = coszen
+        cosz = torch.clamp(coszen_raw, min=0.001)
+        chil = torch.clamp(xl_t, min=-0.4, max=0.6)
+        chil = torch.where(torch.abs(chil) <= 0.01, torch.full_like(chil, 0.01), chil)
+        phi1 = 0.5 - 0.633 * chil - 0.330 * chil * chil
+        phi2 = 0.877 * (1.0 - 2.0 * phi1)
+        phi2 = torch.where(torch.abs(phi2) > eps, phi2, eps)
+        gdir = phi1 + phi2 * cosz
+        twostext = gdir / cosz
+        avmu = (1.0 - (phi1 / phi2) * torch.log(torch.clamp((phi1 + phi2) / torch.clamp(phi1, min=eps), min=eps))) / phi2
+        temp0 = gdir + phi2 * cosz
+        temp1 = phi1 * cosz
+        temp2 = 1.0 - temp1 / torch.clamp(temp0, min=eps) * torch.log(torch.clamp((temp1 + temp0) / torch.clamp(temp1, min=eps), min=eps))
+
+        rho = torch.clamp(rho, min=eps)
+        tau = torch.clamp(tau, min=eps)
+        albgrd = torch.clamp(albgrd, min=eps, max=0.999999)
+        albgri = torch.clamp(albgri, min=eps, max=0.999999)
+        omegal = torch.clamp(rho + tau, min=eps, max=0.999999)
+        asu = 0.5 * omegal * gdir / torch.clamp(temp0, min=eps) * temp2
+        betad = (1.0 + avmu * twostext) / torch.clamp(omegal * avmu * twostext, min=eps) * asu
+        betai = 0.5 * ((rho + tau) + (rho - tau) * ((1.0 + chil) / 2.0) ** 2) / omegal
+
+        b = 1.0 - omegal + omegal * betai
+        c1 = omegal * betai
+        tmp0 = avmu * twostext
+        d = tmp0 * omegal * betad
+        f = tmp0 * omegal * (1.0 - betad)
+        tmp1 = torch.clamp(b * b - c1 * c1, min=eps)
+        h = torch.sqrt(tmp1) / torch.clamp(avmu, min=eps)
+        sigma = tmp0 * tmp0 - tmp1
+        sigma = torch.where(
+            torch.abs(sigma) > eps,
+            sigma,
+            torch.where(sigma < 0.0, -eps, eps),
+        )
+        p1 = b + avmu * h
+        p2 = b - avmu * h
+        p3 = b + tmp0
+        p4 = b - tmp0
+        s1 = torch.exp(-torch.clamp(h * laisum, max=40.0))
+        s2 = torch.exp(-torch.clamp(twostext * laisum, max=40.0))
+
+        u1 = b - c1 / albgrd
+        u2 = b - c1 * albgrd
+        u3 = f + c1 * albgrd
+        tmp2 = u1 - avmu * h
+        tmp3 = u1 + avmu * h
+        d1 = p1 * tmp2 / s1 - p2 * tmp3 * s1
+        tmp4 = u2 + avmu * h
+        tmp5 = u2 - avmu * h
+        d2 = tmp4 / s1 - tmp5 * s1
+        h1 = -d * p4 - c1 * f
+        tmp6 = d - h1 * p3 / sigma
+        tmp7 = (d - c1 - h1 / sigma * (u1 + tmp0)) * s2
+        h2 = _torch_safe_divide(tmp6 * tmp2 / s1 - p2 * tmp7, d1)
+        h3 = -_torch_safe_divide(tmp6 * tmp3 * s1 - p1 * tmp7, d1)
+        h4 = -f * p3 - c1 * d
+        tmp8 = h4 / sigma
+        tmp9 = (u3 - tmp8 * (u2 - tmp0)) * s2
+        h5 = -_torch_safe_divide(tmp8 * tmp4 / s1 + tmp9, d2)
+        h6 = _torch_safe_divide(tmp8 * tmp5 * s1 + tmp9, d2)
+        albd = h1 / sigma + h2 + h3
+        ftid = h4 * s2 / sigma + h5 * s1 + h6 / s1
+        ftdd = s2
+
+        u1 = b - c1 / albgri
+        u2 = b - c1 * albgri
+        tmp2 = u1 - avmu * h
+        tmp3 = u1 + avmu * h
+        d1 = p1 * tmp2 / s1 - p2 * tmp3 * s1
+        tmp4 = u2 + avmu * h
+        tmp5 = u2 - avmu * h
+        d2 = tmp4 / s1 - tmp5 * s1
+        h7 = _torch_safe_divide(c1 * tmp2, d1 * s1)
+        h8 = _torch_safe_divide(-c1 * tmp3 * s1, d1)
+        h9 = _torch_safe_divide(tmp4, d2 * s1)
+        h10 = _torch_safe_divide(-tmp5 * s1, d2)
+        albi = h7 + h8
+        ftii = h9 * s1 + h10 / s1
+
+        canopy_mask = (laisum > eps) & (coszen_raw > 0.0)
+        albd = torch.where(canopy_mask, albd, albgrd)
+        albi = torch.where(canopy_mask, albi, albgri)
+        ftdd = torch.where(canopy_mask, ftdd, torch.ones_like(ftdd))
+        ftid = torch.where(canopy_mask, ftid, torch.zeros_like(ftid))
+        ftii = torch.where(canopy_mask, ftii, torch.ones_like(ftii))
+        albd = torch.where(torch.isfinite(albd), albd, albgrd)
+        albi = torch.where(torch.isfinite(albi), albi, albgri)
+        ftdd = torch.where(torch.isfinite(ftdd), ftdd, torch.ones_like(ftdd))
+        ftid = torch.where(torch.isfinite(ftid), ftid, torch.zeros_like(ftid))
+        ftii = torch.where(torch.isfinite(ftii), ftii, torch.ones_like(ftii))
+        return (
+            torch.clamp(albd, min=0.0, max=1.0),
+            torch.clamp(albi, min=0.0, max=1.0),
+            ftdd,
+            ftid,
+            ftii,
+        )
+
+    rho_vis, tau_vis = _weighted_canopy_optics_torch(
+        elai=elai_t,
+        esai=esai_t,
+        rhol=_to_torch(rholvis, device, dtype),
+        rhos=_to_torch(rhosvis, device, dtype),
+        taul=_to_torch(taulvis, device, dtype),
+        taus=_to_torch(tausvis, device, dtype),
+    )
+    rho_nir, tau_nir = _weighted_canopy_optics_torch(
+        elai=elai_t,
+        esai=esai_t,
+        rhol=_to_torch(rholnir, device, dtype),
+        rhos=_to_torch(rhosnir, device, dtype),
+        taul=_to_torch(taulnir, device, dtype),
+        taus=_to_torch(tausnir, device, dtype),
+    )
+    albd_vis, albi_vis, ftdd_vis, ftid_vis, ftii_vis = _band_albedo_transmission(
+        rho_vis,
+        tau_vis,
+        alb_ground_vis,
+        alb_ground_vis,
+    )
+    albd_nir, albi_nir, ftdd_nir, ftid_nir, ftii_nir = _band_albedo_transmission(
+        rho_nir,
+        tau_nir,
+        alb_ground_nir,
+        alb_ground_nir,
+    )
+
+    fsdsvd = torch.clamp(_to_torch(atmosphere.forc_solad_vis, device, dtype), min=0.0)
+    fsdsnd = torch.clamp(_to_torch(atmosphere.forc_solad_nir, device, dtype), min=0.0)
+    fsdsvi = torch.clamp(_to_torch(atmosphere.forc_solai_vis, device, dtype), min=0.0)
+    fsdsni = torch.clamp(_to_torch(atmosphere.forc_solai_nir, device, dtype), min=0.0)
+    fsrvd = fsdsvd * albd_vis
+    fsrnd = fsdsnd * albd_nir
+    fsrvi = fsdsvi * albi_vis
+    fsrni = fsdsni * albi_nir
+    fsr = fsrvd + fsrnd + fsrvi + fsrni
+    fsds_total = fsdsvd + fsdsnd + fsdsvi + fsdsni
+    fsa = torch.clamp(fsds_total - fsr, min=0.0)
+    fsa_out = torch.minimum(fsa, forc_swrad_t)
+    trd_vis = fsdsvd * ftdd_vis
+    tri_vis = fsdsvd * ftid_vis + fsdsvi * ftii_vis
+    trd_nir = fsdsnd * ftdd_nir
+    tri_nir = fsdsnd * ftid_nir + fsdsni * ftii_nir
+    sabg = (
+        (trd_vis + tri_vis) * (1.0 - alb_ground_vis)
+        + (trd_nir + tri_nir) * (1.0 - alb_ground_nir)
+    )
+    sabg = torch.minimum(torch.clamp(sabg, min=0.0), fsa_out)
+    sabv = torch.clamp(fsa_out - sabg, min=0.0)
+
+    return {
+        "albgrd_mean": torch.stack((alb_ground_vis, alb_ground_nir), dim=-1),
+        "albgri_mean": torch.stack((alb_ground_vis, alb_ground_nir), dim=-1),
+        "albd_mean": torch.stack((albd_vis, albd_nir), dim=-1),
+        "albi_mean": torch.stack((albi_vis, albi_nir), dim=-1),
+        "fsdsvd_mean": fsdsvd,
+        "fsdsnd_mean": fsdsnd,
+        "fsdsvi_mean": fsdsvi,
+        "fsdsni_mean": fsdsni,
+        "fsrvd_mean": fsrvd,
+        "fsrnd_mean": fsrnd,
+        "fsrvi_mean": fsrvi,
+        "fsrni_mean": fsrni,
+        "fsr_mean": torch.minimum(fsr, forc_swrad_t),
+        "fsa_mean": fsa_out,
+        "sabg_mean": sabg,
+        "sabv_mean": sabv,
+    }
 
 
 def _weighted_canopy_optics(
@@ -7603,6 +7937,13 @@ def predict_surface_targets(
                     y_masked = bundle.model(x2_masked)
                     for t_idx in t_indices:
                         y[:, t_idx] = y_masked[:, t_idx]
+            y = _apply_surface_energy_smp_l_clip_for_targets(
+                bundle,
+                x2,
+                y,
+                input_idx_map,
+                already_zero_feature_names=already_zero_feature_names,
+            )
             y = y.reshape(batch_shape + (len(bundle.target_names),))
         y_phys = postprocess_surface_predictions_torch(y, bundle, surface_features=x)
         targets = _target_map_torch(y_phys, bundle.target_names)
@@ -7614,6 +7955,7 @@ def predict_surface_targets(
     x = _to_torch(x_scaled, device, dtype)
     batch_shape = tuple(x.shape[:-1])
     x2 = x.reshape(-1, x.shape[-1])
+    input_idx_map = _bundle_input_index_map(tuple(bundle.input_names))
     with torch.inference_mode():
         y = bundle.model(x2)
         # Apply per-target input masks: re-run forward with blocked features zeroed
@@ -7626,7 +7968,6 @@ def predict_surface_targets(
                     continue
                 key = tuple(sorted(f_names))
                 mask_key_to_targets.setdefault(key, []).append(bundle.target_names.index(t_name))
-            input_idx_map = _bundle_input_index_map(tuple(bundle.input_names))
             for f_names_key, t_indices in mask_key_to_targets.items():
                 if all(f_name in already_zero_feature_names for f_name in f_names_key):
                     continue
@@ -7638,6 +7979,13 @@ def predict_surface_targets(
                 y_masked = bundle.model(x2_masked)
                 for t_idx in t_indices:
                     y[:, t_idx] = y_masked[:, t_idx]
+        y = _apply_surface_energy_smp_l_clip_for_targets(
+            bundle,
+            x2,
+            y,
+            input_idx_map,
+            already_zero_feature_names=already_zero_feature_names,
+        )
         y = y.reshape(batch_shape + (len(bundle.target_names),))
     y_phys = postprocess_surface_predictions(y.detach().cpu().numpy(), bundle, surface_features=x_np)
     targets = _target_map(y_phys, bundle.target_names)
