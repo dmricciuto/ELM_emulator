@@ -6524,6 +6524,40 @@ def _absorbed_ground_shortwave_native_like_torch(
     return torch.minimum(torch.clamp(absorbed, min=0.0), torch.clamp(forc_swrad, min=0.0))
 
 
+def _missing_native_shortwave_inputs(
+    *,
+    atmosphere: "AtmosphericForcingInputs | None",
+    elai: object | None,
+    esai: object | None,
+    soil_albedo: object | None,
+    rholvis: object | None,
+    rholnir: object | None,
+    taulvis: object | None,
+    taulnir: object | None,
+    rhosvis: object | None,
+    rhosnir: object | None,
+    tausvis: object | None,
+    tausnir: object | None,
+    xl: object | None,
+) -> list[str]:
+    required = {
+        "atmosphere": atmosphere,
+        "elai": elai,
+        "esai": esai,
+        "soil_albedo": soil_albedo,
+        "rholvis": rholvis,
+        "rholnir": rholnir,
+        "taulvis": taulvis,
+        "taulnir": taulnir,
+        "rhosvis": rhosvis,
+        "rhosnir": rhosnir,
+        "tausvis": tausvis,
+        "tausnir": tausnir,
+        "xl": xl,
+    }
+    return [name for name, value in required.items() if value is None]
+
+
 def _absorbed_ground_shortwave(
     forc_swrad: np.ndarray,
     *,
@@ -6544,17 +6578,28 @@ def _absorbed_ground_shortwave(
     tausvis: np.ndarray | float | None = None,
     tausnir: np.ndarray | float | None = None,
     xl: np.ndarray | float | None = None,
+    require_native_like: bool = False,
+    context: str = "absorbed ground shortwave",
 ) -> np.ndarray:
     """Approximate no-snow ``sabg`` used by ELM for ``sabg_snow`` when ``snl == 0``."""
     forc_swrad = np.asarray(forc_swrad, dtype=np.float64)
     soil_albedo = _elm_soil_albedo_from_color(soil_color, h2osoi_vol_top)
-    native_inputs = (
-        atmosphere is not None
-        and elai is not None
-        and esai is not None
-        and soil_albedo is not None
-        and all(v is not None for v in (rholvis, rholnir, taulvis, taulnir, rhosvis, rhosnir, tausvis, tausnir, xl))
+    missing_native_inputs = _missing_native_shortwave_inputs(
+        atmosphere=atmosphere,
+        elai=elai,
+        esai=esai,
+        soil_albedo=soil_albedo,
+        rholvis=rholvis,
+        rholnir=rholnir,
+        taulvis=taulvis,
+        taulnir=taulnir,
+        rhosvis=rhosvis,
+        rhosnir=rhosnir,
+        tausvis=tausvis,
+        tausnir=tausnir,
+        xl=xl,
     )
+    native_inputs = not missing_native_inputs
     if native_inputs:
         return _absorbed_ground_shortwave_native_like(
             forc_swrad,
@@ -6574,6 +6619,11 @@ def _absorbed_ground_shortwave(
             tausvis=np.asarray(tausvis, dtype=np.float64),
             tausnir=np.asarray(tausnir, dtype=np.float64),
             xl=np.asarray(xl, dtype=np.float64),
+        )
+    if require_native_like:
+        raise ValueError(
+            f"{context} requires native-like shortwave inputs; "
+            f"missing: {', '.join(missing_native_inputs)}"
         )
     if elai is not None:
         trans = np.exp(-0.5 * np.maximum(np.asarray(elai, dtype=np.float64), 0.0))
@@ -6621,6 +6671,8 @@ def _absorbed_ground_shortwave_torch(
     tausvis: np.ndarray | torch.Tensor | float | None = None,
     tausnir: np.ndarray | torch.Tensor | float | None = None,
     xl: np.ndarray | torch.Tensor | float | None = None,
+    require_native_like: bool = False,
+    context: str = "absorbed ground shortwave",
 ) -> torch.Tensor:
     """Torch equivalent of `_absorbed_ground_shortwave`."""
     forc_swrad_t = _to_torch(forc_swrad, device, dtype)
@@ -6630,13 +6682,22 @@ def _absorbed_ground_shortwave_torch(
         device=device,
         dtype=dtype,
     )
-    native_inputs = (
-        atmosphere is not None
-        and elai is not None
-        and esai is not None
-        and soil_albedo is not None
-        and all(v is not None for v in (rholvis, rholnir, taulvis, taulnir, rhosvis, rhosnir, tausvis, tausnir, xl))
+    missing_native_inputs = _missing_native_shortwave_inputs(
+        atmosphere=atmosphere,
+        elai=elai,
+        esai=esai,
+        soil_albedo=soil_albedo,
+        rholvis=rholvis,
+        rholnir=rholnir,
+        taulvis=taulvis,
+        taulnir=taulnir,
+        rhosvis=rhosvis,
+        rhosnir=rhosnir,
+        tausvis=tausvis,
+        tausnir=tausnir,
+        xl=xl,
     )
+    native_inputs = not missing_native_inputs
     if native_inputs:
         return _absorbed_ground_shortwave_native_like_torch(
             forc_swrad_t,
@@ -6658,6 +6719,11 @@ def _absorbed_ground_shortwave_torch(
             tausvis=tausvis,
             tausnir=tausnir,
             xl=xl,
+        )
+    if require_native_like:
+        raise ValueError(
+            f"{context} requires native-like shortwave inputs; "
+            f"missing: {', '.join(missing_native_inputs)}"
         )
     if elai is not None:
         trans = torch.exp(-0.5 * torch.clamp(_to_torch(elai, device, dtype), min=0.0))
@@ -6733,6 +6799,8 @@ def sabg_snow_from_state(
     tausvis: np.ndarray | float | None = None,
     tausnir: np.ndarray | float | None = None,
     xl: np.ndarray | float | None = None,
+    require_native_like: bool = False,
+    context: str = "sabg_snow",
 ) -> np.ndarray:
     """Approximate ELM ``sabg_snow_patch``.
 
@@ -6761,7 +6829,7 @@ def sabg_snow_from_state(
     When SAI, optical traits, and direct/diffuse VIS/NIR forcing are available,
     sub-canopy transmission follows the native ELM two-stream equations used by
     ``SurfaceAlbedoMod``.  Otherwise the older :math:`\\exp(-0.5 \\cdot LAI)`
-    fallback is used.
+    fallback is used unless ``require_native_like`` is set.
 
     Returns
     -------
@@ -6787,6 +6855,8 @@ def sabg_snow_from_state(
         tausvis=tausvis,
         tausnir=tausnir,
         xl=xl,
+        require_native_like=require_native_like,
+        context=context,
     )
 
     # Sub-canopy shortwave (canopy transmission ≈ exp(-0.5 * LAI)).
@@ -6844,6 +6914,8 @@ def sabg_snow_from_state(
             tausvis=tausvis,
             tausnir=tausnir,
             xl=xl,
+            require_native_like=require_native_like,
+            context=context,
         )
         return np.where(has_snow, snow_absorbed, ground_absorbed)
 
@@ -6876,6 +6948,8 @@ def sabg_snow_from_state_torch(
     tausvis: np.ndarray | torch.Tensor | float | None = None,
     tausnir: np.ndarray | torch.Tensor | float | None = None,
     xl: np.ndarray | torch.Tensor | float | None = None,
+    require_native_like: bool = False,
+    context: str = "sabg_snow",
 ) -> torch.Tensor:
     """Torch-native approximation of ELM ``sabg_snow_patch``."""
     forc_swrad_t = _to_torch(forc_swrad, device, dtype)
@@ -6899,6 +6973,8 @@ def sabg_snow_from_state_torch(
         tausvis=tausvis,
         tausnir=tausnir,
         xl=xl,
+        require_native_like=require_native_like,
+        context=context,
     )
     if elai is not None:
         trans = torch.exp(-0.5 * torch.clamp(_to_torch(elai, device, dtype), min=0.0))
@@ -6942,6 +7018,8 @@ def sabg_snow_from_state_torch(
             tausvis=tausvis,
             tausnir=tausnir,
             xl=xl,
+            require_native_like=require_native_like,
+            context=context,
         )
         return torch.where(has_snow, snow_absorbed, ground_absorbed)
 

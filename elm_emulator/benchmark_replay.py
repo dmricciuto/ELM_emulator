@@ -113,6 +113,8 @@ from .regional_output import (
 )
 from .regional_plotting import _filter_regional_plot_diag_maps, _plot_diag_maps
 
+STEFAN_BOLTZMANN = 5.670374419e-8
+
 STATIC_PARAMETER_FEATURE_NAMES = (
     "pft_type",
     "flnr",
@@ -1510,6 +1512,7 @@ def _load_elm_history_scalar_hourly_override(
     path: Path,
     *,
     var_name: str,
+    aliases: tuple[str, ...] | list[str] | None = None,
     year: int,
     month: int,
     ncell: int,
@@ -1519,10 +1522,23 @@ def _load_elm_history_scalar_hourly_override(
     """Load a lag-aligned daily ELM scalar history field and repeat hourly."""
     n_days_needed = int(math.ceil(int(n1h) / 24.0))
     start_record = _day_of_year_start(year, month, calendar)
-    current = _read_elm_scalar_history(_find_elm_history_file(path, year), var_name, ncell)
+    names = tuple(dict.fromkeys((str(var_name), *(str(name) for name in (aliases or ())))))
+
+    def _read_any(path_i: Path) -> np.ndarray:
+        last_error: Exception | None = None
+        for name in names:
+            try:
+                return _read_elm_scalar_history(path_i, name, ncell)
+            except KeyError as exc:
+                last_error = exc
+        raise KeyError(
+            f"{path_i} does not contain any of: {', '.join(names)}"
+        ) from last_error
+
+    current = _read_any(_find_elm_history_file(path, year))
     pieces = [current]
     if start_record + n_days_needed > current.shape[0]:
-        pieces.append(_read_elm_scalar_history(_find_elm_history_file(path, year + 1), var_name, ncell))
+        pieces.append(_read_any(_find_elm_history_file(path, year + 1)))
     daily = np.concatenate(pieces, axis=0)[start_record:start_record + n_days_needed, :]
     if daily.shape[0] < n_days_needed:
         raise ValueError(
@@ -1892,6 +1908,8 @@ def run_regional_pass(
     precomputed: "dict | None" = None,  # output of _precompute_month_cpu; avoids recompute
     nens: int = 1,                  # ensemble size; flnr/mbbopt randomised when > 1
     ensemble_seed: int = 42,
+    ensemble_flnr_factors: tuple[float, ...] | list[float] | None = None,
+    ensemble_mbbopt_factors: tuple[float, ...] | list[float] | None = None,
     step_callback=None,             # optional callable(step_i, last_result, blended, tbot, dayl)
     carbon_model=None,              # optional OnlineDailyCarbonModel; advances once per day and feeds back LAI
     ood_diagnostics_stride: int = 0,
@@ -1925,6 +1943,7 @@ def run_regional_pass(
     soil_temperature_override: np.ndarray | None = None,
     ground_heat_flux_override: np.ndarray | None = None,
     ground_heat_flux_override_targets: tuple[str, ...] | list[str] | None = None,
+    zwt_override: np.ndarray | None = None,
     precip_multiplier: np.ndarray | None = None,
     max_hours: int | None = None,
 ) -> tuple:
@@ -2167,6 +2186,33 @@ def run_regional_pass(
         if override_np.shape[1] == 1 and ncell > 1:
             override_np = np.broadcast_to(override_np, (override_np.shape[0], ncell)).copy()
         ground_heat_flux_override_t = torch.as_tensor(
+            override_np[:n1h],
+            device=device,
+            dtype=dtype,
+        )
+    zwt_override_t = None
+    if zwt_override is not None:
+        override_np = np.asarray(zwt_override, dtype=np.float32)
+        if override_np.ndim == 1:
+            override_np = override_np[:, None]
+        if override_np.ndim != 2:
+            raise ValueError(
+                "zwt_override must have shape (hour, cell) or (hour,), "
+                f"got {override_np.shape}"
+            )
+        if override_np.shape[0] < n1h:
+            raise ValueError(
+                f"zwt_override has {override_np.shape[0]} hours but replay needs {n1h}"
+            )
+        if override_np.shape[1] not in (1, ncell):
+            raise ValueError(
+                f"zwt_override cell dimension {override_np.shape[1]} does not match ncell={ncell}"
+            )
+        if not np.all(np.isfinite(override_np[:n1h])):
+            raise ValueError("zwt_override contains missing/non-finite values")
+        if override_np.shape[1] == 1 and ncell > 1:
+            override_np = np.broadcast_to(override_np, (override_np.shape[0], ncell)).copy()
+        zwt_override_t = torch.as_tensor(
             override_np[:n1h],
             device=device,
             dtype=dtype,
@@ -2479,16 +2525,52 @@ def run_regional_pass(
             flush=True,
         )
 
-    # For nens > 1, sample per-ensemble flnr / mbbopt from ±2σ of training distribution.
-    # Shape (1, nens) so they broadcast over the cell axis in the feature tensor.
+    flnr_factor_t = None
+    mbbopt_factor_t = None
+    if ensemble_flnr_factors is not None or ensemble_mbbopt_factors is not None:
+        flnr_factor_np = np.asarray(
+            [1.0] if ensemble_flnr_factors is None else ensemble_flnr_factors,
+            dtype=np.float64,
+        ).reshape(-1)
+        mbbopt_factor_np = np.asarray(
+            [1.0] if ensemble_mbbopt_factors is None else ensemble_mbbopt_factors,
+            dtype=np.float64,
+        ).reshape(-1)
+        if flnr_factor_np.size != nens or mbbopt_factor_np.size != nens:
+            raise ValueError(
+                "explicit regional ensemble trait factors must have one value per ensemble member "
+                f"(got flnr={flnr_factor_np.size}, mbbopt={mbbopt_factor_np.size}, nens={nens})"
+            )
+        flnr_factor_t = torch.as_tensor(flnr_factor_np.reshape(1, nens), device=device, dtype=dtype)
+        mbbopt_factor_t = torch.as_tensor(mbbopt_factor_np.reshape(1, nens), device=device, dtype=dtype)
+
+    # For nens > 1, sample per-ensemble flnr / mbbopt from ±2σ of training distribution,
+    # unless explicit multiplicative factors are supplied. Shape (1, nens) so values
+    # broadcast over the cell axis in the feature tensor.
     _rng_ens = np.random.default_rng(ensemble_seed)
     ens_flnr_dev: list = []   # per-PFT: (1, nens) tensor or None
     ens_mbbopt_dev: list = []
     for p_idx, p_bundle in enumerate(pft_bundles):
-        def _ens_param(feat_idx, static_val):
+        def _ens_param(feat_idx, static_val, factor_t=None):
             if feat_idx is None:
                 return None
             static_arr = np.asarray(static_val)
+            if factor_t is not None:
+                base_t = torch.as_tensor(static_arr, device=device, dtype=dtype)
+                if base_t.ndim == 0:
+                    base_t = base_t.reshape(1, 1)
+                elif base_t.ndim == 1:
+                    base_t = base_t.reshape(-1, 1)
+                elif base_t.ndim == 2 and base_t.shape[1] == 1:
+                    pass
+                else:
+                    base_t = base_t.reshape(base_t.shape[0], -1)
+                    if base_t.shape[1] != 1:
+                        raise ValueError(
+                            "explicit ensemble trait factors require scalar or per-cell baseline traits; "
+                            f"got shape {tuple(base_t.shape)} for feature index {feat_idx}"
+                        )
+                return base_t * factor_t
             if static_arr.ndim > 0 and static_arr.size > 1:
                 val_t = torch.as_tensor(static_arr, device=device, dtype=dtype)
                 if val_t.ndim == 1:
@@ -2512,10 +2594,16 @@ def run_regional_pass(
             vals   = _rng_ens.uniform(mean_v - 2.0 * std_v, mean_v + 2.0 * std_v,
                                       size=(1, nens)).astype(np.float64)
             return torch.as_tensor(vals, device=device, dtype=dtype)
-        ens_flnr_dev.append(_ens_param(pft_flnr_idx[p_idx],
-                                       getattr(pft_statics[p_idx], 'flnr', 0.0)))
-        ens_mbbopt_dev.append(_ens_param(pft_mbbopt_idx[p_idx],
-                                         getattr(pft_statics[p_idx], 'mbbopt', 0.0)))
+        ens_flnr_dev.append(_ens_param(
+            pft_flnr_idx[p_idx],
+            getattr(pft_statics[p_idx], 'flnr', 0.0),
+            flnr_factor_t,
+        ))
+        ens_mbbopt_dev.append(_ens_param(
+            pft_mbbopt_idx[p_idx],
+            getattr(pft_statics[p_idx], 'mbbopt', 0.0),
+            mbbopt_factor_t,
+        ))
 
     # Import CoupledColumnState once outside the hot loop.
     from .coupled_surface_hydrology_soiltemp import CoupledColumnState as _CCS
@@ -2557,6 +2645,38 @@ def run_regional_pass(
         )
 
     state = _apply_soil_temperature_override(state, 0)
+
+    def _apply_zwt_override(state_in: "_CCS", step_i: int) -> "_CCS":
+        if zwt_override_t is None:
+            return state_in
+        source = zwt_override_t[min(int(step_i), zwt_override_t.shape[0] - 1)]
+        current = (
+            state_in.zwt.to(device=device, dtype=dtype)
+            if isinstance(state_in.zwt, torch.Tensor)
+            else torch.as_tensor(state_in.zwt, device=device, dtype=dtype)
+        )
+        zwt = source.reshape(ncell, 1).expand_as(current)
+        return _CCS(
+            h2osoi_liq=state_in.h2osoi_liq,
+            h2osoi_ice=state_in.h2osoi_ice,
+            h2ocan=state_in.h2ocan,
+            h2osfc=state_in.h2osfc,
+            frac_h2osfc=state_in.frac_h2osfc,
+            frac_sno=state_in.frac_sno,
+            zwt=zwt,
+            t_soisno=state_in.t_soisno,
+            wa=state_in.wa,
+            t_h2osfc=state_in.t_h2osfc,
+            t10=state_in.t10,
+            t10_history=state_in.t10_history,
+            h2osno=state_in.h2osno,
+            snow_depth=state_in.snow_depth,
+            snow_t=state_in.snow_t,
+            snow_layers=state_in.snow_layers,
+            int_snow=state_in.int_snow,
+        )
+
+    state = _apply_zwt_override(state, 0)
 
     # Pre-allocate zero tensors for struct fields we do not have real data for.
     # The regional builder skips writing these ablated feature names so their
@@ -3183,6 +3303,8 @@ def run_regional_pass(
                     tausvis=p_static.tausvis,
                     tausnir=p_static.tausnir,
                     xl=p_static.xl,
+                    require_native_like=True,
+                    context="regional sabg_snow feature",
                 )
                 if not snow_model_enabled
                 else sabg_snow_from_state_torch(
@@ -3205,6 +3327,8 @@ def run_regional_pass(
                     tausvis=p_static.tausvis,
                     tausnir=p_static.tausnir,
                     xl=p_static.xl,
+                    require_native_like=True,
+                    context="regional sabg_snow feature",
                 )
             )
 
@@ -3379,6 +3503,8 @@ def run_regional_pass(
     _acc_evap_tot: "torch.Tensor | None" = None
     _acc_sh: "torch.Tensor | None" = None
     _acc_tg: "torch.Tensor | None" = None
+    _acc_fire: "torch.Tensor | None" = None
+    _acc_fira: "torch.Tensor | None" = None
     _acc_fgr: "torch.Tensor | None" = None
     _acc_hs_soil: "torch.Tensor | None" = None
     _acc_hs_top_snow: "torch.Tensor | None" = None
@@ -4796,6 +4922,8 @@ def run_regional_pass(
                     tausvis=_universal_static_col("tausvis"),
                     tausnir=_universal_static_col("tausnir"),
                     xl=_universal_static_col("xl"),
+                    require_native_like=True,
+                    context="regional universal sabg_snow feature",
                 )
                 if not snow_model_enabled
                 else sabg_snow_from_state_torch(
@@ -4818,6 +4946,8 @@ def run_regional_pass(
                     tausvis=_universal_static_col("tausvis"),
                     tausnir=_universal_static_col("tausnir"),
                     xl=_universal_static_col("xl"),
+                    require_native_like=True,
+                    context="regional universal sabg_snow feature",
                 )
             )
             universal_feature_batch[..., universal_sabg_idx] = _broadcast_universal_feature_value(sabg_snow)
@@ -4825,6 +4955,7 @@ def run_regional_pass(
 
     for step_i in range(n1h):
         state = _apply_soil_temperature_override(state, step_i)
+        state = _apply_zwt_override(state, step_i)
         row = met_1h[step_i]  # (ncell, 7) – device tensor, float dtype
 
         # Unpack met vars (ncell,) → expand to (ncell, 1) for broadcasting.
@@ -5618,6 +5749,7 @@ def run_regional_pass(
             _update_outlier("t_soil_raw", _cell_mean_tensor(last_result.state.t_soisno[..., 0]))
             state = _clip_state_temperatures(last_result.state)
             state = _apply_soil_temperature_override(state, step_i)
+            state = _apply_zwt_override(state, step_i)
             last_result.state = state
             _active_snow_cells = _active_snow_cell_count(state)
             _snow_present_cells = _snow_present_cell_count(state)
@@ -5655,6 +5787,7 @@ def run_regional_pass(
             # the last coupled value until the next aggregated physics step.
             state = _clip_state_temperatures(blended_canopy_state)
             state = _apply_soil_temperature_override(state, step_i)
+            state = _apply_zwt_override(state, step_i)
             if last_result is not None:
                 last_result.state = state
 
@@ -6025,9 +6158,59 @@ def run_regional_pass(
             _hs_top_snow_diag = _target_diag("hs_top_snow")
             _hs_h2osfc_diag = _target_diag("hs_h2osfc")
             _dhsdT_diag = _target_diag("dhsdT")
-            _tg_diag = _diag_tensor(
-                coupled_t_grnd_from_state_torch(state, device, dtype)
-            ).mean(1)
+            _tg_full = _diag_tensor(coupled_t_grnd_from_state_torch(state, device, dtype))
+            _tg_diag = _tg_full.mean(1)
+
+            def _pft_target_stack(name: str) -> "torch.Tensor | None":
+                rows = []
+                for _pft_idx in range(npft):
+                    _value = None
+                    if (
+                        universal_targets_stack is not None
+                        and _pft_idx in universal_batch_slot_for_pft
+                        and name in universal_targets_stack
+                    ):
+                        _value = universal_targets_stack[name][universal_batch_slot_for_pft[_pft_idx]]
+                    if _value is None and _pft_idx < len(all_targets) and all_targets[_pft_idx] is not None:
+                        _value = all_targets[_pft_idx].get(name)
+                    if _value is None:
+                        return None
+                    rows.append(_diag_tensor(_value))
+                return torch.stack(rows, dim=0) if rows else None
+
+            _fire_diag = torch.full_like(_t, torch.nan)
+            _fira_diag = torch.full_like(_t, torch.nan)
+            _t_veg_stack = _pft_target_stack("t_veg")
+            if _t_veg_stack is not None:
+                _flds_full = flds.expand(-1, nens) if flds.shape[1] == 1 else _diag_tensor(flds)
+                _frac_sno_lw = torch.clamp(_diag_tensor(blended.get("diag_frac_sno_input", state.frac_sno)), min=0.0, max=1.0)
+                _emg = (1.0 - _frac_sno_lw) * 0.96 + _frac_sno_lw * 0.97
+                _lai_lw = torch.clamp(lai_active_today, min=0.0)
+                _sai_lw = torch.clamp(sai_active_today, min=0.0)
+                _emv = (1.0 - torch.exp(-(_lai_lw + _sai_lw))).unsqueeze(-1)
+                _frac_veg_lw = torch.clamp(frac_veg_active_today, min=0.0, max=1.0).unsqueeze(-1)
+                _tg_emit4 = torch.clamp(_tg_full, min=150.0, max=400.0).pow(4).unsqueeze(0)
+                _tv_emit4 = torch.clamp(_t_veg_stack, min=150.0, max=400.0).pow(4)
+                _flds_b = _flds_full.unsqueeze(0)
+                _emg_b = _emg.unsqueeze(0)
+                _ulrad = (
+                    (1.0 - _emg_b) * (1.0 - _emv).pow(2) * _flds_b
+                    + _emv * (1.0 + (1.0 - _emg_b) * (1.0 - _emv)) * STEFAN_BOLTZMANN * _tv_emit4
+                    + _emg_b * (1.0 - _emv) * STEFAN_BOLTZMANN * _tg_emit4
+                )
+                _open_ground_lw = (
+                    (1.0 - _frac_veg_lw) * (1.0 - _emg_b) * _flds_b
+                    + (1.0 - _frac_veg_lw) * _emg_b * STEFAN_BOLTZMANN * _tg_emit4
+                )
+                _fire_pft = torch.where(
+                    _emv > 1.0e-8,
+                    _ulrad + _open_ground_lw,
+                    _open_ground_lw,
+                )
+                _fire_full = _blend_pft_stack(_fire_pft)
+                _fire_diag = _fire_full.mean(1) if _fire_full.ndim > 1 else _fire_full
+                _fira_full = _fire_full - _flds_full
+                _fira_diag = _fira_full.mean(1) if _fira_full.ndim > 1 else _fira_full
             _trait_std_diag: dict[str, "torch.Tensor"] = {}
             if universal_trait_var_targets_stack is not None:
                 for _target_name, _out_key in _REGIONAL_TRAIT_STD_TARGET_MAP.items():
@@ -6110,6 +6293,8 @@ def run_regional_pass(
                     ("gpp_gc_m2_d_mean", _gpp_gc_diag),
                     ("lai_mean", _lai_col),
                     ("tg_mean", _tg_diag),
+                    ("eflx_lwrad_out_mean", _fire_diag),
+                    ("eflx_lwrad_net_mean", _fira_diag),
                     ("eflx_fgr12_mean", _eflx_fgr12_diag),
                     ("hs_soil_mean", _hs_soil_diag),
                     ("hs_top_snow_mean", _hs_top_snow_diag),
@@ -6252,6 +6437,8 @@ def run_regional_pass(
                     _acc_evap_tot = _evap_tot_diag.clone()
                     _acc_sh = _sh_diag.clone()
                     _acc_tg = _tg_diag.clone()
+                    _acc_fire = _fire_diag.clone()
+                    _acc_fira = _fira_diag.clone()
                     _acc_fgr = _eflx_fgr12_diag.clone()
                     _acc_hs_soil = _hs_soil_diag.clone()
                     _acc_hs_top_snow = _hs_top_snow_diag.clone()
@@ -6298,6 +6485,8 @@ def run_regional_pass(
                     _acc_evap_tot.add_(_evap_tot_diag)
                     _acc_sh.add_(_sh_diag)
                     _acc_tg.add_(_tg_diag)
+                    _acc_fire.add_(_fire_diag)
+                    _acc_fira.add_(_fira_diag)
                     _acc_fgr.add_(_eflx_fgr12_diag)
                     _acc_hs_soil.add_(_hs_soil_diag)
                     _acc_hs_top_snow.add_(_hs_top_snow_diag)
@@ -6339,10 +6528,17 @@ def run_regional_pass(
                 _daily_stack = torch.stack(
                     (
                         _t,
+                        _q,
+                        _pbot,
+                        _lwrad,
+                        _wind,
+                        _rh2m_diag,
                         _rain_diag,
                         _snow_diag,
                         _fsds_diag,
                         _tg_diag,
+                        _fire_diag,
+                        _fira_diag,
                         _eflx_fgr12_diag,
                         _hs_soil_diag,
                         _hs_top_snow_diag,
@@ -6587,6 +6783,10 @@ def run_regional_pass(
             diag_maps["elm_h0_H2OSOI"] = (_acc_elm_h0_h2osoi / _acc_n).cpu().numpy()
         if _acc_tg is not None:
             diag_maps["tg_mean"] = (_acc_tg / _acc_n).cpu().numpy()
+        if _acc_fire is not None:
+            diag_maps["eflx_lwrad_out_mean"] = (_acc_fire / _acc_n).cpu().numpy()
+        if _acc_fira is not None:
+            diag_maps["eflx_lwrad_net_mean"] = (_acc_fira / _acc_n).cpu().numpy()
         if _acc_fgr is not None:
             diag_maps["eflx_fgr12_mean"] = (_acc_fgr / _acc_n).cpu().numpy()
         if _acc_hs_soil is not None:
@@ -7115,6 +7315,28 @@ def parse_args() -> argparse.Namespace:
              "randomised uniformly over ±2σ of the training distribution per member.",
     )
     p.add_argument(
+        "--regional-ensemble-flnr-factors",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Explicit multiplicative flnr factors for a deterministic regional ensemble. "
+            "When used with --regional-ensemble-mbbopt-factors, the Cartesian product is "
+            "used and --regional-ensemble-size is set automatically."
+        ),
+    )
+    p.add_argument(
+        "--regional-ensemble-mbbopt-factors",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Explicit multiplicative mbbopt factors for a deterministic regional ensemble. "
+            "When used with --regional-ensemble-flnr-factors, the Cartesian product is "
+            "used and --regional-ensemble-size is set automatically."
+        ),
+    )
+    p.add_argument(
         "--regional-trait-ensemble-size",
         type=int,
         default=1,
@@ -7503,6 +7725,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--regional-soil-temp-override-nlev",
+        type=int,
+        choices=range(1, 16),
+        default=15,
+        metavar="N",
+        help=(
+            "Number of leading TSOI levels to clamp when "
+            "--regional-soil-temp-override-elm-history is used. Use 1 to force "
+            "only level 1 and leave deeper soil temperatures prognostic."
+        ),
+    )
+    p.add_argument(
         "--regional-ground-heat-override-elm-history",
         type=Path,
         default=None,
@@ -7526,6 +7760,25 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Learned thermal target names to replace with the ELM history "
             "ground-heat override. Default: hs_soil hs_top_snow."
+        ),
+    )
+    p.add_argument(
+        "--regional-zwt-override-elm-history",
+        type=Path,
+        default=None,
+        help=(
+            "Diagnostic regional mode: clamp the replay water-table depth state "
+            "to lag-aligned daily ZWT from this ELM h0 file or case run directory. "
+            "Daily values are held constant through each replay day."
+        ),
+    )
+    p.add_argument(
+        "--regional-zwt-override-var",
+        type=str,
+        default="ZWT",
+        help=(
+            "ELM h0 scalar variable to use for --regional-zwt-override-elm-history. "
+            "ZWT0 is also accepted as an alias."
         ),
     )
     p.add_argument(
@@ -7753,6 +8006,41 @@ def parse_args() -> argparse.Namespace:
         print(
             f"  [args] using --ensemble-size={args.ensemble_size} as "
             f"--regional-ensemble-size={args.regional_ensemble_size}"
+        )
+    if args.regional and (
+        args.regional_ensemble_flnr_factors is not None
+        or args.regional_ensemble_mbbopt_factors is not None
+    ):
+        flnr_values = (
+            [1.0]
+            if args.regional_ensemble_flnr_factors is None
+            else [float(v) for v in args.regional_ensemble_flnr_factors]
+        )
+        mbbopt_values = (
+            [1.0]
+            if args.regional_ensemble_mbbopt_factors is None
+            else [float(v) for v in args.regional_ensemble_mbbopt_factors]
+        )
+        bad_values = [
+            v for v in (*flnr_values, *mbbopt_values)
+            if not np.isfinite(v) or v <= 0.0
+        ]
+        if bad_values:
+            raise SystemExit("regional ensemble trait factors must be finite positive values")
+        flnr_grid = [f for f in flnr_values for _ in mbbopt_values]
+        mbbopt_grid = [m for _ in flnr_values for m in mbbopt_values]
+        grid_size = len(flnr_grid)
+        if regional_ensemble_size_given and int(args.regional_ensemble_size) != grid_size:
+            print(
+                "  [args] overriding --regional-ensemble-size with explicit "
+                f"trait-factor grid size {grid_size}"
+            )
+        args.regional_ensemble_size = grid_size
+        args.regional_ensemble_flnr_factors = flnr_grid
+        args.regional_ensemble_mbbopt_factors = mbbopt_grid
+        print(
+            "  [args] regional ensemble trait-factor grid: "
+            f"{len(flnr_values)} flnr x {len(mbbopt_values)} mbbopt = {grid_size} members"
         )
     if args.universal and not args.regional:
         raise SystemExit("--universal is currently supported only with --regional")
@@ -8297,6 +8585,8 @@ def _run_regional_benchmark(
             "day": [],
             "hour_of_day": [],
             "physics_step": [],
+            "ensemble_flnr_factor": [],
+            "ensemble_mbbopt_factor": [],
             "fpsn_patch": [],
             "qflx_tran_veg": [],
             "lai": [],
@@ -8512,6 +8802,16 @@ def _run_regional_benchmark(
             _record_ts_value("month", month)
             _record_ts_value("day", step_i // 24 + 1)
             _record_ts_value("hour_of_day", step_i % 24)
+            if args.regional_ensemble_flnr_factors is not None:
+                _record_ts_value(
+                    "ensemble_flnr_factor",
+                    np.asarray(args.regional_ensemble_flnr_factors, dtype=np.float64).reshape(1, -1),
+                )
+            if args.regional_ensemble_mbbopt_factors is not None:
+                _record_ts_value(
+                    "ensemble_mbbopt_factor",
+                    np.asarray(args.regional_ensemble_mbbopt_factors, dtype=np.float64).reshape(1, -1),
+                )
             _record_ts_value(
                 "physics_step",
                 1
@@ -9147,13 +9447,15 @@ def _run_regional_benchmark(
                 year=year,
                 month=month,
                 ncell=ncell,
-                nlev=15,
+                nlev=int(args.regional_soil_temp_override_nlev),
                 n1h=n1h_override,
                 calendar=run_calendar,
             )
             print(
                 f"  {year}-{month:02d}:  loaded ELM TSOI override "
-                f"{tuple(soil_temperature_override.shape)} in {time.perf_counter() - t_override_start:.2f}s"
+                f"{tuple(soil_temperature_override.shape)} "
+                f"(first {int(args.regional_soil_temp_override_nlev)} level(s)) "
+                f"in {time.perf_counter() - t_override_start:.2f}s"
             )
         ground_heat_flux_override = None
         if args.regional_ground_heat_override_elm_history is not None:
@@ -9176,6 +9478,29 @@ def _run_regional_benchmark(
                 f"  {year}-{month:02d}:  loaded ELM {args.regional_ground_heat_override_var} "
                 f"ground-heat override {tuple(ground_heat_flux_override.shape)} "
                 f"for {', '.join(args.regional_ground_heat_override_targets)} "
+                f"in {time.perf_counter() - t_override_start:.2f}s"
+            )
+        zwt_override = None
+        if args.regional_zwt_override_elm_history is not None:
+            n1h_override = (
+                int(met_cpu.shape[0]) - 2 * int(met_padding_steps)
+            ) * int(met_input_step_hours)
+            if args.regional_max_hours is not None:
+                n1h_override = min(n1h_override, int(args.regional_max_hours))
+            t_override_start = time.perf_counter()
+            zwt_override = _load_elm_history_scalar_hourly_override(
+                args.regional_zwt_override_elm_history,
+                var_name=args.regional_zwt_override_var,
+                aliases=("ZWT0",),
+                year=year,
+                month=month,
+                ncell=ncell,
+                n1h=n1h_override,
+                calendar=run_calendar,
+            )
+            print(
+                f"  {year}-{month:02d}:  loaded ELM {args.regional_zwt_override_var} "
+                f"ZWT override {tuple(zwt_override.shape)} "
                 f"in {time.perf_counter() - t_override_start:.2f}s"
             )
 
@@ -9207,6 +9532,8 @@ def _run_regional_benchmark(
             profile_sections=_prof,
             nens=args.regional_ensemble_size,
             ensemble_seed=args.ensemble_seed,
+            ensemble_flnr_factors=args.regional_ensemble_flnr_factors,
+            ensemble_mbbopt_factors=args.regional_ensemble_mbbopt_factors,
             carbon_model=carbon_model,
             ood_diagnostics_stride=args.regional_ood_stride,
             ood_threshold=args.regional_ood_threshold,
@@ -9266,6 +9593,7 @@ def _run_regional_benchmark(
             soil_temperature_override=soil_temperature_override,
             ground_heat_flux_override=ground_heat_flux_override,
             ground_heat_flux_override_targets=tuple(args.regional_ground_heat_override_targets),
+            zwt_override=zwt_override,
             precip_multiplier=precip_multiplier_this_month,
             max_hours=args.regional_max_hours,
         )
@@ -9580,7 +9908,11 @@ def _run_regional_benchmark(
                 selected_cell_info=selected_cell_info,
             )
         if args.regional_cell_timeseries:
-            ts = {key: np.stack(values, axis=0) for key, values in regional_ts_records.items()}
+            ts = {
+                key: np.stack(values, axis=0)
+                for key, values in regional_ts_records.items()
+                if values
+            }
             plot_output = regional_cell_plot_output if regional_cell_plot_output is not None else args.plot_output
             plot_diagnostics(
                 plot_output,
