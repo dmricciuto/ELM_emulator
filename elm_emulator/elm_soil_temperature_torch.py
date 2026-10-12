@@ -136,6 +136,53 @@ def _batched_tridiagonal_torch(
     return x
 
 
+def _batched_pentadiagonal_torch(
+    lower2: torch.Tensor,
+    lower1: torch.Tensor,
+    diagonal: torch.Tensor,
+    upper1: torch.Tensor,
+    upper2: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    """Solve batched pentadiagonal systems by banded Gaussian elimination.
+
+    All arrays have shape ``(nbatch, n)``.  The two extra diagonals are
+    needed by ELM's ``snow : standing-water : soil`` ordering: the bottom
+    snow layer and top soil layer are separated by the standing-water
+    unknown, but remain thermally coupled.
+    """
+    n = diagonal.shape[1]
+    l1 = lower1.clone()
+    d = diagonal.clone()
+    u1 = upper1.clone()
+    r = rhs.clone()
+
+    for j in range(n):
+        if j >= 2:
+            multiplier2 = lower2[:, j] / d[:, j - 2]
+            l1[:, j] = l1[:, j] - multiplier2 * u1[:, j - 2]
+            d[:, j] = d[:, j] - multiplier2 * upper2[:, j - 2]
+            r[:, j] = r[:, j] - multiplier2 * r[:, j - 2]
+        if j >= 1:
+            multiplier1 = l1[:, j] / d[:, j - 1]
+            d[:, j] = d[:, j] - multiplier1 * u1[:, j - 1]
+            if j < n - 1:
+                u1[:, j] = u1[:, j] - multiplier1 * upper2[:, j - 1]
+            r[:, j] = r[:, j] - multiplier1 * r[:, j - 1]
+
+    solution = torch.empty_like(rhs)
+    solution[:, -1] = r[:, -1] / d[:, -1]
+    if n >= 2:
+        solution[:, -2] = (r[:, -2] - u1[:, -2] * solution[:, -1]) / d[:, -2]
+    for j in range(n - 3, -1, -1):
+        solution[:, j] = (
+            r[:, j]
+            - u1[:, j] * solution[:, j + 1]
+            - upper2[:, j] * solution[:, j + 2]
+        ) / d[:, j]
+    return solution
+
+
 @dataclass
 class SoilThermalParametersTorch:
     dz: torch.Tensor
@@ -148,6 +195,10 @@ class SoilThermalParametersTorch:
     tkdry: torch.Tensor
     csol: torch.Tensor
     nlevbed: int | None = None
+    # ELM defaults this switch to false.  Retain the newer temperature/rho
+    # curve as an option, but use the Jordan (1991) conductivity by default so
+    # replay matches ordinary native cases.
+    use_t_rho_dependent_snowthk: bool = False
 
 
 @dataclass
@@ -182,6 +233,10 @@ class SoilTemperatureForcingTorch:
     eflx_bot: torch.Tensor
     hs_top_snow: Optional[torch.Tensor] = None
     hs_h2osfc: Optional[torch.Tensor] = None
+    # Total snow-branch absorbed shortwave.  hs_top_snow already contains the
+    # top-layer contribution; the remainder is deposited in internal layers.
+    sabg_snow_total: Optional[torch.Tensor] = None
+    sabg_snow_top: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -194,6 +249,8 @@ class SoilTemperatureResultTorch:
     qflx_snow_melt: Optional[torch.Tensor] = None
     qflx_scalar_snow_melt: Optional[torch.Tensor] = None
     qflx_snow_freeze: Optional[torch.Tensor] = None
+    qflx_snow_melt_profile: Optional[torch.Tensor] = None
+    qflx_snow_freeze_profile: Optional[torch.Tensor] = None
     qflx_soil_melt: Optional[torch.Tensor] = None
     qflx_soil_freeze: Optional[torch.Tensor] = None
     qflx_soil_melt_profile: Optional[torch.Tensor] = None
@@ -201,6 +258,9 @@ class SoilTemperatureResultTorch:
     phase_hm_h2osfc: Optional[torch.Tensor] = None
     phase_xm_h2osfc: Optional[torch.Tensor] = None
     phase_temp1_h2osfc: Optional[torch.Tensor] = None
+    partial_snow_blend_energy_residual_uncorrected: Optional[torch.Tensor] = None
+    partial_snow_blend_energy_residual_corrected: Optional[torch.Tensor] = None
+    partial_snow_blend_water_residual: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -345,9 +405,22 @@ def _snow_layers_from_storage_fallback(
     return SnowLayerState(snl=snl, dz=dz, h2osoi_ice=ice, h2osoi_liq=liq, t_snow=temp)
 
 
-def _snow_thermal_conductivity_torch(tempk: torch.Tensor, density: torch.Tensor) -> torch.Tensor:
+def _snow_thermal_conductivity_torch(
+    tempk: torch.Tensor,
+    density: torch.Tensor,
+    *,
+    use_t_rho_dependent: bool = False,
+) -> torch.Tensor:
     tempk = torch.as_tensor(tempk)
     density = torch.clamp(torch.as_tensor(density), min=0.0, max=RHO_ICE)
+    if not use_t_rho_dependent:
+        # Native ELM default (use_T_rho_dependent_snowthk = .false.):
+        # Jordan (1991), expressed in terms of bulk snow density.
+        jordan = TKAIR + (7.75e-5 * density + 1.105e-6 * density**2) * (
+            TKICE - TKAIR
+        )
+        return torch.clamp(jordan, min=1.0e-3)
+
     dens_ratio = density / RHO_ICE
     k_curve = torch.stack(
         [
@@ -541,6 +614,8 @@ def _snow_soil_temperature_step_torch(
     forcing: SoilTemperatureForcingTorch,
     dt: float,
     workspace: SoilTemperatureTorchWorkspace | None = None,
+    *,
+    blend_partial_snow_soil_temperature: bool = False,
 ) -> SoilTemperatureResultTorch:
     t = state.t_soisno
     hliq = state.h2osoi_liq
@@ -560,6 +635,18 @@ def _snow_soil_temperature_step_torch(
         torch.zeros((), device=device, dtype=dtype) if forcing.hs_h2osfc is None else forcing.hs_h2osfc,
         batch_shape,
     ).reshape(-1)
+    sabg_snow_total = _broadcast_batch(
+        torch.zeros((), device=device, dtype=dtype)
+        if forcing.sabg_snow_total is None
+        else forcing.sabg_snow_total,
+        batch_shape,
+    ).reshape(-1)
+    sabg_snow_top = _broadcast_batch(
+        torch.zeros((), device=device, dtype=dtype)
+        if forcing.sabg_snow_top is None
+        else forcing.sabg_snow_top,
+        batch_shape,
+    ).reshape(-1)
     dhsdT = _broadcast_batch(forcing.dhsdT, batch_shape).reshape(-1)
     eflx_bot = _broadcast_batch(forcing.eflx_bot, batch_shape).reshape(-1)
 
@@ -569,6 +656,15 @@ def _snow_soil_temperature_step_torch(
         snow_dz_state = torch.broadcast_to(torch.as_tensor(snow_layers_state.dz, device=device, dtype=dtype), batch_shape + (MAX_SNOW_LAYERS,)).reshape(-1, MAX_SNOW_LAYERS).clone()
         snow_ice_state = torch.broadcast_to(torch.as_tensor(snow_layers_state.h2osoi_ice, device=device, dtype=dtype), batch_shape + (MAX_SNOW_LAYERS,)).reshape(-1, MAX_SNOW_LAYERS).clone()
         snow_liq_state = torch.broadcast_to(torch.as_tensor(snow_layers_state.h2osoi_liq, device=device, dtype=dtype), batch_shape + (MAX_SNOW_LAYERS,)).reshape(-1, MAX_SNOW_LAYERS).clone()
+        snow_rds_input = getattr(snow_layers_state, "snw_rds", None)
+        snow_rds_state = (
+            torch.broadcast_to(
+                torch.as_tensor(snow_rds_input, device=device, dtype=dtype),
+                batch_shape + (MAX_SNOW_LAYERS,),
+            ).reshape(-1, MAX_SNOW_LAYERS).clone()
+            if snow_rds_input is not None
+            else None
+        )
         if state.snow_t is None:
             snow_t_state = torch.broadcast_to(
                 torch.as_tensor(snow_layers_state.t_snow, device=device, dtype=dtype),
@@ -609,6 +705,12 @@ def _snow_soil_temperature_step_torch(
         snow_ice_state = torch.as_tensor(snow_layers_state.h2osoi_ice, device=device, dtype=dtype).reshape(-1, MAX_SNOW_LAYERS).clone()
         snow_liq_state = torch.as_tensor(snow_layers_state.h2osoi_liq, device=device, dtype=dtype).reshape(-1, MAX_SNOW_LAYERS).clone()
         snow_t_state = torch.as_tensor(snow_layers_state.t_snow, device=device, dtype=dtype).reshape(-1, MAX_SNOW_LAYERS).clone()
+        snow_rds_input = getattr(snow_layers_state, "snw_rds", None)
+        snow_rds_state = (
+            torch.as_tensor(snow_rds_input, device=device, dtype=dtype).reshape(-1, MAX_SNOW_LAYERS).clone()
+            if snow_rds_input is not None
+            else None
+        )
 
     h2osfc = _broadcast_batch(0.0 if state.h2osfc is None else state.h2osfc, batch_shape).reshape(-1).clone()
     frac_h2osfc = _broadcast_batch(0.0 if state.frac_h2osfc is None else state.frac_h2osfc, batch_shape).reshape(-1).clone()
@@ -616,9 +718,10 @@ def _snow_soil_temperature_step_torch(
 
     dz = _broadcast_to_layers(params.dz, batch_shape, nlev).reshape(-1, nlev)
     z = _broadcast_to_layers(params.z, batch_shape, nlev).reshape(-1, nlev)
-    cv_soil, thk_soil, _ = soil_thermal_properties_torch(state, params)
+    cv_soil, thk_soil, tk_soil = soil_thermal_properties_torch(state, params)
     cv_soil2 = cv_soil.reshape(-1, nlev)
     thk_soil2 = thk_soil.reshape(-1, nlev)
+    tk_soil2 = tk_soil.reshape(-1, nlev)
     t2 = t.reshape(-1, nlev)
 
     def _selected_params(rows: torch.Tensor) -> SoilThermalParametersTorch:
@@ -637,6 +740,7 @@ def _snow_soil_temperature_step_torch(
             tkdry=select(params.tkdry),
             csol=select(params.csol),
             nlevbed=params.nlevbed,
+            use_t_rho_dependent_snowthk=params.use_t_rho_dependent_snowthk,
         )
 
     base_result = _soil_temperature_step_torch_no_snow(
@@ -673,6 +777,25 @@ def _snow_soil_temperature_step_torch(
     )
     qflx_snow_melt = torch.zeros(nbatch, device=device, dtype=dtype)
     qflx_snow_freeze = torch.zeros(nbatch, device=device, dtype=dtype)
+    qflx_snow_melt_profile = torch.zeros(
+        (nbatch, MAX_SNOW_LAYERS), device=device, dtype=dtype
+    )
+    qflx_snow_freeze_profile = torch.zeros_like(qflx_snow_melt_profile)
+    blend_energy_residual_uncorrected = (
+        torch.zeros(nbatch, device=device, dtype=dtype)
+        if blend_partial_snow_soil_temperature
+        else None
+    )
+    blend_energy_residual_corrected = (
+        torch.zeros(nbatch, device=device, dtype=dtype)
+        if blend_partial_snow_soil_temperature
+        else None
+    )
+    blend_water_residual = (
+        torch.zeros(nbatch, device=device, dtype=dtype)
+        if blend_partial_snow_soil_temperature
+        else None
+    )
     if base_result.phase_hm_h2osfc is None:
         phase_hm_h2osfc = torch.full(batch_shape, torch.nan, device=device, dtype=dtype)
         phase_xm_h2osfc = torch.full(batch_shape, torch.nan, device=device, dtype=dtype)
@@ -714,8 +837,11 @@ def _snow_soil_temperature_step_torch(
         z_g = z.index_select(0, rows)
         cv_soil_g = cv_soil2.index_select(0, rows)
         thk_soil_g = thk_soil2.index_select(0, rows)
+        hs_soil_g = hs_soil.index_select(0, rows)
         hs_top_snow_g = hs_top_snow.index_select(0, rows)
         hs_h2osfc_g = hs_h2osfc.index_select(0, rows)
+        sabg_snow_total_g = sabg_snow_total.index_select(0, rows)
+        sabg_snow_top_g = sabg_snow_top.index_select(0, rows)
         dhsdT_g = dhsdT.index_select(0, rows)
         eflx_bot_g = eflx_bot.index_select(0, rows)
 
@@ -725,7 +851,11 @@ def _snow_soil_temperature_step_torch(
             min=0.0,
             max=RHO_ICE,
         )
-        snow_k = _snow_thermal_conductivity_torch(snow_temp_layer, snow_density)
+        snow_k = _snow_thermal_conductivity_torch(
+            snow_temp_layer,
+            snow_density,
+            use_t_rho_dependent=params.use_t_rho_dependent_snowthk,
+        )
         snow_z = -torch.sum(snow_dz, dim=1, keepdim=True) + torch.cumsum(snow_dz, dim=1) - 0.5 * snow_dz
         wice0 = snow_ice.clone()
         wmass0 = snow_ice + snow_liq
@@ -733,53 +863,45 @@ def _snow_soil_temperature_step_torch(
         temp = torch.cat([snow_temp_layer, t_g], dim=1)
         cv_col = torch.cat([snow_cv, cv_soil_g], dim=1)
         z_col = torch.cat([snow_z, z_g], dim=1)
-        layer_k = torch.cat([snow_k, thk_soil_g], dim=1)
         ncol = nsnow + nlev
 
         k_int = torch.zeros((m, ncol), device=device, dtype=dtype)
         fn_old = torch.zeros_like(k_int)
-        k_int[:, :-1] = (
-            2.0
-            * layer_k[:, :-1]
-            * layer_k[:, 1:]
-            / torch.clamp(layer_k[:, :-1] + layer_k[:, 1:], min=1.0e-12)
+        # Match SoilThermProp's interface-location weighting.  A simple
+        # harmonic mean is only equivalent for equal distances on both sides
+        # of the interface, which is not generally true for ELM snow layers.
+        if nsnow > 1:
+            snow_interface = snow_z[:, :-1] + 0.5 * snow_dz[:, :-1]
+            z_left = snow_z[:, :-1]
+            z_right = snow_z[:, 1:]
+            k_left = snow_k[:, :-1]
+            k_right = snow_k[:, 1:]
+            k_int[:, : nsnow - 1] = (
+                k_left * k_right * (z_right - z_left)
+                / torch.clamp(
+                    k_left * (z_right - snow_interface)
+                    + k_right * (snow_interface - z_left),
+                    min=1.0e-12,
+                )
+            )
+        snow_soil_interface = torch.zeros((m,), device=device, dtype=dtype)
+        k_int[:, nsnow - 1] = (
+            snow_k[:, -1]
+            * thk_soil_g[:, 0]
+            * (z_g[:, 0] - snow_z[:, -1])
+            / torch.clamp(
+                snow_k[:, -1] * (z_g[:, 0] - snow_soil_interface)
+                + thk_soil_g[:, 0] * (snow_soil_interface - snow_z[:, -1]),
+                min=1.0e-12,
+            )
         )
+        if nlev > 1:
+            k_int[:, nsnow : nsnow + nlev - 1] = tk_soil2.index_select(0, rows)[:, :-1]
         fn_old[:, :-1] = k_int[:, :-1] * (temp[:, 1:] - temp[:, :-1]) / torch.clamp(
             z_col[:, 1:] - z_col[:, :-1],
             min=1.0e-12,
         )
         fn_old[:, -1] = eflx_bot_g
-
-        fact = dt / torch.clamp(cv_col, min=1.0e-12)
-        a = torch.zeros((m, ncol), device=device, dtype=dtype)
-        bb = torch.zeros_like(a)
-        cc = torch.zeros_like(a)
-        r = torch.zeros_like(a)
-
-        dzp0 = torch.clamp(z_col[:, 1] - z_col[:, 0], min=1.0e-12)
-        bb[:, 0] = 1.0 + (1.0 - CNFAC) * fact[:, 0] * k_int[:, 0] / dzp0 - fact[:, 0] * dhsdT_g
-        cc[:, 0] = -(1.0 - CNFAC) * fact[:, 0] * k_int[:, 0] / dzp0
-        r[:, 0] = temp[:, 0] + fact[:, 0] * ((hs_top_snow_g - dhsdT_g * temp[:, 0]) + CNFAC * fn_old[:, 0])
-
-        if ncol > 2:
-            mid = slice(1, ncol - 1)
-            prev = slice(0, ncol - 2)
-            nxt = slice(2, ncol)
-            dzm = torch.clamp(z_col[:, mid] - z_col[:, prev], min=1.0e-12)
-            dzp = torch.clamp(z_col[:, nxt] - z_col[:, mid], min=1.0e-12)
-            a[:, mid] = -(1.0 - CNFAC) * fact[:, mid] * k_int[:, prev] / dzm
-            bb[:, mid] = 1.0 + (1.0 - CNFAC) * fact[:, mid] * (k_int[:, mid] / dzp + k_int[:, prev] / dzm)
-            cc[:, mid] = -(1.0 - CNFAC) * fact[:, mid] * k_int[:, mid] / dzp
-            r[:, mid] = temp[:, mid] + CNFAC * fact[:, mid] * (fn_old[:, mid] - fn_old[:, prev])
-
-        dzm_bot = torch.clamp(z_col[:, -1] - z_col[:, -2], min=1.0e-12)
-        a[:, -1] = -(1.0 - CNFAC) * fact[:, -1] * k_int[:, -2] / dzm_bot
-        bb[:, -1] = 1.0 + (1.0 - CNFAC) * fact[:, -1] * k_int[:, -2] / dzm_bot
-        r[:, -1] = temp[:, -1] - CNFAC * fact[:, -1] * fn_old[:, -2] + fact[:, -1] * fn_old[:, -1]
-
-        solved = _batched_tridiagonal_torch(a, bb, cc, r, workspace=workspace)
-        snow_t_solved = torch.minimum(solved[:, :nsnow], torch.full_like(solved[:, :nsnow], TFRZ))
-        t_solved = solved[:, nsnow:]
 
         has_h2osfc = (h2osfc_g > 1.0e-8) & (frac_h2osfc_g > 1.0e-8)
         c_h2osfc = torch.clamp(CPLIQ * h2osfc_g / torch.clamp(frac_h2osfc_g, min=1.0e-12), min=1.0e-6)
@@ -790,29 +912,253 @@ def _snow_soil_temperature_step_torch(
         tk_h2osfc = TKWAT * thk1 * (z1 + zh2osfc) / torch.clamp(TKWAT * z1 + thk1 * zh2osfc, min=1.0e-12)
         dzm_h2osfc = 0.5 * dz_h2osfc + z1
         fn_h2osfc_old_g = tk_h2osfc * (t_g[:, 0] - t_h2osfc_g) / torch.clamp(dzm_h2osfc, min=1.0e-12)
-        bb_h2osfc = (
+
+        # Native ELM orders the thermal unknowns as
+        # ``snow : standing-water : soil`` and solves them simultaneously.
+        # Snow and standing water both couple to the top soil layer, giving
+        # the system two off-diagonals on either side.
+        fact = dt / torch.clamp(cv_col, min=1.0e-12)
+        # Native applies the CAPR surface-temperature correction to whichever
+        # layer is topmost, including an explicit snow layer.
+        top_surface = snow_z[:, 0] - 0.5 * snow_dz[:, 0]
+        top_next_z = z_col[:, 1]
+        top_den = 0.5 * (
+            snow_z[:, 0] - top_surface
+            + CAPR * (top_next_z - top_surface)
+        )
+        fact[:, 0] = (
+            dt
+            / torch.clamp(cv_col[:, 0], min=1.0e-12)
+            * snow_dz[:, 0]
+            / torch.clamp(top_den, min=1.0e-12)
+        )
+
+        # hs_top_snow contains top-layer absorption. Deposit the diagnosed
+        # remainder of total snow absorption in internal snow layers.  The
+        # training data do not expose native per-layer SNICAR fluxes, so mass
+        # weighting supplies a conservative profile while preserving the
+        # diagnosed total whenever the learned top term does not exceed it.
+        sabg_internal = torch.zeros((m, nsnow), device=device, dtype=dtype)
+        if nsnow > 1:
+            internal_total = torch.clamp(
+                sabg_snow_total_g - torch.clamp(sabg_snow_top_g, min=0.0),
+                min=0.0,
+            )
+            internal_mass = torch.clamp(snow_ice[:, 1:] + snow_liq[:, 1:], min=0.0)
+            internal_weight = internal_mass / torch.clamp(
+                torch.sum(internal_mass, dim=1, keepdim=True), min=1.0e-12
+            )
+            sabg_internal[:, 1:] = internal_total[:, None] * internal_weight
+        nunknown = ncol + 1
+        lower2 = torch.zeros((m, nunknown), device=device, dtype=dtype)
+        lower1 = torch.zeros_like(lower2)
+        diagonal = torch.zeros_like(lower2)
+        upper1 = torch.zeros_like(lower2)
+        upper2 = torch.zeros_like(lower2)
+        rhs = torch.zeros_like(lower2)
+
+        # Snow equations. The bottom snow layer connects across the inserted
+        # standing-water unknown to top soil, hence an upper-2 coefficient.
+        dzp0 = torch.clamp(z_col[:, 1] - z_col[:, 0], min=1.0e-12)
+        diagonal[:, 0] = (
+            1.0
+            + (1.0 - CNFAC) * fact[:, 0] * k_int[:, 0] / dzp0
+            - fact[:, 0] * dhsdT_g
+        )
+        snow_top_upper = -(1.0 - CNFAC) * fact[:, 0] * k_int[:, 0] / dzp0
+        if nsnow == 1:
+            upper2[:, 0] = snow_top_upper
+        else:
+            upper1[:, 0] = snow_top_upper
+        rhs[:, 0] = temp[:, 0] + fact[:, 0] * (
+            (hs_top_snow_g - dhsdT_g * temp[:, 0]) + CNFAC * fn_old[:, 0]
+        )
+        for snow_j in range(1, nsnow):
+            dzm_snow = torch.clamp(
+                z_col[:, snow_j] - z_col[:, snow_j - 1], min=1.0e-12
+            )
+            dzp_snow = torch.clamp(
+                z_col[:, snow_j + 1] - z_col[:, snow_j], min=1.0e-12
+            )
+            lower1[:, snow_j] = (
+                -(1.0 - CNFAC)
+                * fact[:, snow_j]
+                * k_int[:, snow_j - 1]
+                / dzm_snow
+            )
+            diagonal[:, snow_j] = 1.0 + (1.0 - CNFAC) * fact[:, snow_j] * (
+                k_int[:, snow_j] / dzp_snow
+                + k_int[:, snow_j - 1] / dzm_snow
+            )
+            snow_upper = (
+                -(1.0 - CNFAC)
+                * fact[:, snow_j]
+                * k_int[:, snow_j]
+                / dzp_snow
+            )
+            if snow_j == nsnow - 1:
+                upper2[:, snow_j] = snow_upper
+            else:
+                upper1[:, snow_j] = snow_upper
+            rhs[:, snow_j] = temp[:, snow_j] + CNFAC * fact[:, snow_j] * (
+                fn_old[:, snow_j] - fn_old[:, snow_j - 1]
+            ) + fact[:, snow_j] * sabg_internal[:, snow_j]
+
+        # Standing-water equation. Its own heat capacity is per inundated
+        # area; frac_h2osfc enters only in the reciprocal soil-row coupling.
+        water_idx = nsnow
+        water_diagonal = (
             1.0
             + (1.0 - CNFAC) * (dt / c_h2osfc) * tk_h2osfc / torch.clamp(dzm_h2osfc, min=1.0e-12)
             - (dt / c_h2osfc) * dhsdT_g
         )
-        c_h2osfc_soil = -(1.0 - CNFAC) * (dt / c_h2osfc) * tk_h2osfc / torch.clamp(dzm_h2osfc, min=1.0e-12)
-        r_h2osfc = t_h2osfc_g + (dt / c_h2osfc) * (
+        water_to_soil = -(1.0 - CNFAC) * (dt / c_h2osfc) * tk_h2osfc / torch.clamp(
+            dzm_h2osfc, min=1.0e-12
+        )
+        water_rhs = t_h2osfc_g + (dt / c_h2osfc) * (
             hs_h2osfc_g - dhsdT_g * t_h2osfc_g + CNFAC * fn_h2osfc_old_g
         )
-        t_h2osfc_candidate = (r_h2osfc - c_h2osfc_soil * t_solved[:, 0]) / torch.clamp(bb_h2osfc, min=1.0e-12)
-        fn_h2osfc_new_g = tk_h2osfc * (t_solved[:, 0] - t_h2osfc_candidate) / torch.clamp(dzm_h2osfc, min=1.0e-12)
+        diagonal[:, water_idx] = torch.where(
+            has_h2osfc, water_diagonal, torch.ones_like(water_diagonal)
+        )
+        upper1[:, water_idx] = torch.where(
+            has_h2osfc, water_to_soil, torch.zeros_like(water_to_soil)
+        )
+        rhs[:, water_idx] = torch.where(has_h2osfc, water_rhs, t_h2osfc_g)
+
+        # Top soil receives the absolute snow, standing-water, and uncovered
+        # fractions. This is the key native fraction reconciliation in the
+        # heat equation; neither covered branch is scaled a second time.
+        soil0_idx = nsnow + 1
+        soil_fact = fact[:, nsnow]
+        dzm_snow_soil = torch.clamp(
+            z_col[:, nsnow] - z_col[:, nsnow - 1], min=1.0e-12
+        )
+        dzp_soil = torch.clamp(z_g[:, 1] - z_g[:, 0], min=1.0e-12)
+        bare_fraction = torch.clamp(
+            1.0 - frac_sno_eff - frac_h2osfc_g, min=0.0, max=1.0
+        )
+        snow_conductance = k_int[:, nsnow - 1] / dzm_snow_soil
+        soil_conductance = k_int[:, nsnow] / dzp_soil
+        water_conductance = tk_h2osfc / torch.clamp(dzm_h2osfc, min=1.0e-12)
+        lower2[:, soil0_idx] = (
+            -frac_sno_eff * (1.0 - CNFAC) * soil_fact * snow_conductance
+        )
+        lower1[:, soil0_idx] = torch.where(
+            has_h2osfc,
+            -frac_h2osfc_g * (1.0 - CNFAC) * soil_fact * water_conductance,
+            torch.zeros_like(soil_fact),
+        )
+        diagonal[:, soil0_idx] = (
+            1.0
+            + (1.0 - CNFAC)
+            * soil_fact
+            * (
+                soil_conductance
+                + frac_sno_eff * snow_conductance
+                + torch.where(
+                    has_h2osfc,
+                    frac_h2osfc_g * water_conductance,
+                    torch.zeros_like(water_conductance),
+                )
+            )
+            - bare_fraction * soil_fact * dhsdT_g
+        )
+        upper1[:, soil0_idx] = -(1.0 - CNFAC) * soil_fact * soil_conductance
+        rhs[:, soil0_idx] = t_g[:, 0] + soil_fact * (
+            bare_fraction * (hs_soil_g - dhsdT_g * t_g[:, 0])
+            + CNFAC
+            * (
+                fn_old[:, nsnow]
+                - frac_sno_eff * fn_old[:, nsnow - 1]
+                - torch.where(
+                    has_h2osfc,
+                    frac_h2osfc_g * fn_h2osfc_old_g,
+                    torch.zeros_like(fn_h2osfc_old_g),
+                )
+            )
+        )
+
+        # Remaining soil layers retain the ordinary tridiagonal stencil.
+        for soil_j in range(1, nlev - 1):
+            joint_j = soil0_idx + soil_j
+            physical_j = nsnow + soil_j
+            dzm_soil = torch.clamp(z_g[:, soil_j] - z_g[:, soil_j - 1], min=1.0e-12)
+            dzp_soil_j = torch.clamp(z_g[:, soil_j + 1] - z_g[:, soil_j], min=1.0e-12)
+            lower1[:, joint_j] = (
+                -(1.0 - CNFAC)
+                * fact[:, physical_j]
+                * k_int[:, physical_j - 1]
+                / dzm_soil
+            )
+            diagonal[:, joint_j] = 1.0 + (1.0 - CNFAC) * fact[:, physical_j] * (
+                k_int[:, physical_j] / dzp_soil_j
+                + k_int[:, physical_j - 1] / dzm_soil
+            )
+            upper1[:, joint_j] = (
+                -(1.0 - CNFAC)
+                * fact[:, physical_j]
+                * k_int[:, physical_j]
+                / dzp_soil_j
+            )
+            rhs[:, joint_j] = temp[:, physical_j] + CNFAC * fact[:, physical_j] * (
+                fn_old[:, physical_j] - fn_old[:, physical_j - 1]
+            )
+
+        bottom_idx = nunknown - 1
+        bottom_physical_idx = ncol - 1
+        dzm_bottom = torch.clamp(z_g[:, -1] - z_g[:, -2], min=1.0e-12)
+        lower1[:, bottom_idx] = (
+            -(1.0 - CNFAC)
+            * fact[:, bottom_physical_idx]
+            * k_int[:, bottom_physical_idx - 1]
+            / dzm_bottom
+        )
+        diagonal[:, bottom_idx] = 1.0 + (1.0 - CNFAC) * fact[:, bottom_physical_idx] * (
+            k_int[:, bottom_physical_idx - 1] / dzm_bottom
+        )
+        rhs[:, bottom_idx] = (
+            temp[:, bottom_physical_idx]
+            - CNFAC * fact[:, bottom_physical_idx] * fn_old[:, bottom_physical_idx - 1]
+            + fact[:, bottom_physical_idx] * fn_old[:, bottom_physical_idx]
+        )
+
+        joint_solution = _batched_pentadiagonal_torch(
+            lower2, lower1, diagonal, upper1, upper2, rhs
+        )
+        snow_t_solved = torch.minimum(
+            joint_solution[:, :nsnow],
+            torch.full_like(joint_solution[:, :nsnow], TFRZ),
+        )
+        t_h2osfc_candidate = joint_solution[:, water_idx]
+        t_solved = joint_solution[:, soil0_idx:]
+        # Preserve the unconstrained snow solution for phase change: a value
+        # above freezing is the energy surplus that melts snow. Only the
+        # prognostic snow temperature itself is capped at TFRZ.
+        solved = torch.cat([joint_solution[:, :nsnow], t_solved], dim=1)
+        fn_h2osfc_new_g = tk_h2osfc * (t_solved[:, 0] - t_h2osfc_candidate) / torch.clamp(
+            dzm_h2osfc, min=1.0e-12
+        )
         t_h2osfc_g = torch.where(has_h2osfc, t_h2osfc_candidate, t_h2osfc_g)
         fn_h2osfc_old_g = torch.where(has_h2osfc, fn_h2osfc_old_g, torch.zeros_like(fn_h2osfc_old_g))
         fn_h2osfc_new_g = torch.where(has_h2osfc, fn_h2osfc_new_g, torch.zeros_like(fn_h2osfc_new_g))
 
         mass_mask = h2osno_g > 0.0
-        snow_xm = frac_sno_eff[:, None] * snow_cv * (solved[:, :nsnow] - TFRZ) / HFUS
+        # Start from the actual solution, then let phase change consume any
+        # over/undershoot and return residual energy to temperature exactly as
+        # native Phasechange_beta does.
+        snow_temp_layer = snow_t_solved.clone()
+        snow_tinc = TFRZ - solved[:, :nsnow]
+        snow_hm = -frac_sno_eff[:, None] * snow_tinc / torch.clamp(
+            fact[:, :nsnow], min=1.0e-30
+        )
         top_tinc = TFRZ - solved[:, 0]
         top_hm = frac_sno_eff * (dhsdT_g * top_tinc - top_tinc / torch.clamp(fact[:, 0], min=1.0e-30))
-        snow_xm = snow_xm.clone()
-        snow_xm[:, 0] = top_hm * dt / HFUS
-        melt_mask = (snow_xm > 0.0) & mass_mask[:, None]
-        freeze_mask = (snow_xm < 0.0) & mass_mask[:, None]
+        snow_hm = snow_hm.clone()
+        snow_hm[:, 0] = top_hm
+        snow_xm = snow_hm * dt / HFUS
+        melt_mask = (snow_xm > 0.0) & (wice0 > 0.0) & mass_mask[:, None]
+        freeze_mask = (snow_xm < 0.0) & (snow_liq > 0.0) & mass_mask[:, None]
         melt_j = torch.minimum(snow_xm, wice0)
         snow_ice_after = torch.where(
             melt_mask,
@@ -820,10 +1166,39 @@ def _snow_soil_temperature_step_torch(
             torch.where(freeze_mask, torch.minimum(wmass0, wice0 - snow_xm), snow_ice),
         )
         snow_liq_after = torch.clamp(wmass0 - snow_ice_after, min=0.0)
+        phase_mask_snow = melt_mask | freeze_mask
+        snow_heatr = snow_hm - HFUS * (wice0 - snow_ice_after) / max(dt, 1.0e-12)
+        snow_temp_residual = torch.full_like(snow_temp_layer, TFRZ)
+        top_residual_den = torch.clamp(
+            1.0 - fact[:, 0] * dhsdT_g,
+            min=1.0e-12,
+        )
+        snow_temp_residual[:, 0] = TFRZ + (
+            fact[:, 0] / frac_sno_eff
+        ) * snow_heatr[:, 0] / top_residual_den
+        if nsnow > 1:
+            snow_temp_residual[:, 1:] = TFRZ + (
+                fact[:, 1:nsnow] / frac_sno_eff[:, None]
+            ) * snow_heatr[:, 1:]
+        snow_temp_layer = torch.where(
+            phase_mask_snow,
+            snow_temp_residual,
+            snow_temp_layer,
+        )
         qflx_snow_melt_g = torch.sum(torch.where(melt_mask, torch.clamp(melt_j, min=0.0), torch.zeros_like(melt_j)), dim=1) / max(dt, 1.0e-12)
         qflx_snow_freeze_g = torch.sum(
             torch.where(freeze_mask, torch.clamp(snow_ice_after - wice0, min=0.0), torch.zeros_like(snow_ice_after)),
             dim=1,
+        ) / max(dt, 1.0e-12)
+        qflx_snow_melt_profile[rows, :nsnow] = torch.where(
+            melt_mask,
+            torch.clamp(melt_j, min=0.0),
+            torch.zeros_like(melt_j),
+        ) / max(dt, 1.0e-12)
+        qflx_snow_freeze_profile[rows, :nsnow] = torch.where(
+            freeze_mask,
+            torch.clamp(snow_ice_after - wice0, min=0.0),
+            torch.zeros_like(snow_ice_after),
         ) / max(dt, 1.0e-12)
         snow_ice = torch.where(mass_mask[:, None], snow_ice_after, snow_ice)
         snow_liq = torch.where(mass_mask[:, None], snow_liq_after, snow_liq)
@@ -909,7 +1284,9 @@ def _snow_soil_temperature_step_torch(
         snow_ice_state[rows, :nsnow] = snow_ice
         snow_liq_state[rows, :nsnow] = snow_liq
         snow_t_state[rows, :nsnow] = snow_temp_layer
-        snow_t_new[rows, :nsnow] = snow_t_solved
+        # Keep the scalar layer-temperature array and SnowLayerState in exact
+        # sync. Coupled t_grnd and subsequent snow hydrology may read either.
+        snow_t_new[rows, :nsnow] = snow_temp_layer
 
         fn_new = torch.zeros((m, ncol), device=device, dtype=dtype)
         fn_new[:, :-1] = k_int[:, :-1] * (solved[:, 1:] - solved[:, :-1]) / torch.clamp(
@@ -928,12 +1305,16 @@ def _snow_soil_temperature_step_torch(
             params_g,
             fact_soil,
             dhsdT_g,
-            torch.zeros((m,), device=device, dtype=dtype),
+            torch.clamp(frac_sno_eff + frac_h2osfc_g, min=0.0, max=1.0),
             dt,
         )
         soil_ice_delta_g = hice_pc_g.reshape(m, nlev) - hice2.index_select(0, rows)
         qflx_soil_melt_profile_g = torch.clamp(-soil_ice_delta_g, min=0.0) / max(dt, 1.0e-12)
         qflx_soil_freeze_profile_g = torch.clamp(soil_ice_delta_g, min=0.0) / max(dt, 1.0e-12)
+
+        # No post-solve snow/bare blend is needed. The joint matrix already
+        # applies frac_sno, frac_h2osfc, and their uncovered complement to the
+        # single column soil state, as native ELM does.
 
         t_pc.index_copy_(0, rows, t_pc_g.reshape(m, nlev))
         hliq_pc.index_copy_(0, rows, hliq_pc_g.reshape(m, nlev))
@@ -946,7 +1327,8 @@ def _snow_soil_temperature_step_torch(
         frac_h2osfc_out.index_copy_(0, rows, frac_h2osfc_g)
         h2osno_out.index_copy_(0, rows, h2osno_g)
         snow_depth_out.index_copy_(0, rows, snow_depth_g)
-        eflx_fgr12.index_copy_(0, rows, -CNFAC * fn_old_soil[:, 0] - (1.0 - CNFAC) * fn_new_soil[:, 0])
+        snow_fgr12 = -CNFAC * fn_old_soil[:, 0] - (1.0 - CNFAC) * fn_new_soil[:, 0]
+        eflx_fgr12.index_copy_(0, rows, snow_fgr12)
         fn_h2osfc_old_out.index_copy_(0, rows, fn_h2osfc_old_g)
         fn_h2osfc_new_out.index_copy_(0, rows, fn_h2osfc_new_g)
         qflx_snow_melt.index_copy_(0, rows, qflx_snow_melt_g)
@@ -961,6 +1343,11 @@ def _snow_soil_temperature_step_torch(
         h2osoi_ice=snow_ice_state.reshape(batch_shape + (MAX_SNOW_LAYERS,)),
         h2osoi_liq=snow_liq_state.reshape(batch_shape + (MAX_SNOW_LAYERS,)),
         t_snow=snow_t_state.reshape(batch_shape + (MAX_SNOW_LAYERS,)),
+        snw_rds=(
+            snow_rds_state.reshape(batch_shape + (MAX_SNOW_LAYERS,))
+            if snow_rds_state is not None
+            else None
+        ),
     )
 
     return SoilTemperatureResultTorch(
@@ -984,6 +1371,12 @@ def _snow_soil_temperature_step_torch(
         qflx_snow_melt=qflx_snow_melt.reshape(batch_shape),
         qflx_scalar_snow_melt=torch.zeros(batch_shape, device=device, dtype=dtype),
         qflx_snow_freeze=qflx_snow_freeze.reshape(batch_shape),
+        qflx_snow_melt_profile=qflx_snow_melt_profile.reshape(
+            batch_shape + (MAX_SNOW_LAYERS,)
+        ),
+        qflx_snow_freeze_profile=qflx_snow_freeze_profile.reshape(
+            batch_shape + (MAX_SNOW_LAYERS,)
+        ),
         qflx_soil_melt=torch.sum(qflx_soil_melt_profile.reshape(batch_shape + (nlev,)), dim=-1),
         qflx_soil_freeze=torch.sum(qflx_soil_freeze_profile.reshape(batch_shape + (nlev,)), dim=-1),
         qflx_soil_melt_profile=qflx_soil_melt_profile.reshape(batch_shape + (nlev,)),
@@ -991,6 +1384,21 @@ def _snow_soil_temperature_step_torch(
         phase_hm_h2osfc=phase_hm_h2osfc,
         phase_xm_h2osfc=phase_xm_h2osfc,
         phase_temp1_h2osfc=phase_temp1_h2osfc,
+        partial_snow_blend_energy_residual_uncorrected=(
+            None
+            if blend_energy_residual_uncorrected is None
+            else blend_energy_residual_uncorrected.reshape(batch_shape)
+        ),
+        partial_snow_blend_energy_residual_corrected=(
+            None
+            if blend_energy_residual_corrected is None
+            else blend_energy_residual_corrected.reshape(batch_shape)
+        ),
+        partial_snow_blend_water_residual=(
+            None
+            if blend_water_residual is None
+            else blend_water_residual.reshape(batch_shape)
+        ),
     )
 
 
@@ -1326,6 +1734,7 @@ def soil_temperature_step_torch(
     workspace: SoilTemperatureTorchWorkspace | None = None,
     *,
     snow_enabled: bool = True,
+    blend_partial_snow_soil_temperature: bool = False,
 ) -> SoilTemperatureResultTorch:
     t = state.t_soisno
     batch_shape = t.shape[:-1]
@@ -1349,7 +1758,14 @@ def soil_temperature_step_torch(
             snow_depth = _broadcast_batch(zero_batch if state.snow_depth is None else state.snow_depth, batch_shape)
             has_active_snow = torch.any((h2osno > MIN_SNOW_LAYER_MASS) & (snow_depth >= 0.01))
         if has_active_snow:
-            return _snow_soil_temperature_step_torch(state, params, forcing, dt, workspace=workspace)
+            return _snow_soil_temperature_step_torch(
+                state,
+                params,
+                forcing,
+                dt,
+                workspace=workspace,
+                blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
+            )
 
     return _soil_temperature_step_torch_no_snow(
         state,

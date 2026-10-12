@@ -35,6 +35,11 @@ from typing import Mapping
 import numpy as np
 from netCDF4 import Dataset
 
+from .thermal_energy_closure import (
+    has_energy_closed_soil_targets,
+    has_energy_closed_surface_targets,
+)
+
 try:
     import torch
     from torch import nn
@@ -91,6 +96,12 @@ from .elm_carbon_torch import (
     rootfr_profile_torch,
 )
 from .paths import DEFAULT_MODEL_DIR
+
+
+# Native ELM has 15 ground-temperature levels, but only the upper 10 are
+# porous soil participating in the default hydrology solve.  Levels 11--15
+# are thermal bedrock and must never be passed to SoilWater/WaterTable.
+ELM_HYDROLOGY_LEVELS = 10
 
 
 class PatchMLP(nn.Module):
@@ -520,6 +531,71 @@ def _repair_snow_fraction_depth_torch(
     )
 
 
+def reconcile_snow_surface_water_fractions_numpy(
+    state: CoupledColumnState,
+) -> CoupledColumnState:
+    """Apply native ELM's mutually exclusive snow/standing-water partition.
+
+    ``frac_h2osfc`` is first diagnosed independently from microtopography. If
+    it overlaps snow, native ``FracH2OSfc`` adjusts the effective fractions so
+    snow + standing water equals one, retaining at least 1% standing-water
+    area when its raw fraction exceeds 1%.
+    """
+    frac_sno = np.clip(_to_np(state.frac_sno), 0.0, 1.0)
+    frac_h2osfc = np.clip(_to_np(state.frac_h2osfc), 0.0, 1.0)
+    h2osno = (
+        np.maximum(_to_np(state.h2osno), 0.0)
+        if state.h2osno is not None
+        else np.zeros_like(frac_sno)
+    )
+    overlap = (h2osno > 0.0) & (frac_sno > 1.0 - frac_h2osfc)
+    water_above_native_floor = frac_h2osfc > 0.01
+    adjusted_water = np.maximum(1.0 - frac_sno, 0.01)
+    frac_h2osfc_new = np.where(
+        overlap & water_above_native_floor,
+        adjusted_water,
+        frac_h2osfc,
+    )
+    frac_sno_new = np.where(overlap, 1.0 - frac_h2osfc_new, frac_sno)
+    return replace(
+        state,
+        frac_sno=np.clip(frac_sno_new, 0.0, 1.0),
+        frac_h2osfc=np.clip(frac_h2osfc_new, 0.0, 1.0),
+    )
+
+
+def reconcile_snow_surface_water_fractions_torch(
+    state: CoupledColumnState,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> CoupledColumnState:
+    """Torch analogue of native ELM's snow/standing-water reconciliation."""
+    frac_sno = torch.clamp(_to_torch(state.frac_sno, device, dtype), min=0.0, max=1.0)
+    frac_h2osfc = torch.clamp(_to_torch(state.frac_h2osfc, device, dtype), min=0.0, max=1.0)
+    h2osno = (
+        torch.clamp(_to_torch(state.h2osno, device, dtype), min=0.0)
+        if state.h2osno is not None
+        else torch.zeros_like(frac_sno)
+    )
+    overlap = (h2osno > 0.0) & (frac_sno > 1.0 - frac_h2osfc)
+    adjusted_water = torch.maximum(
+        1.0 - frac_sno,
+        torch.full_like(frac_h2osfc, 0.01),
+    )
+    frac_h2osfc_new = torch.where(
+        overlap & (frac_h2osfc > 0.01),
+        adjusted_water,
+        frac_h2osfc,
+    )
+    frac_sno_new = torch.where(overlap, 1.0 - frac_h2osfc_new, frac_sno)
+    return replace(
+        state,
+        frac_sno=torch.clamp(frac_sno_new, min=0.0, max=1.0),
+        frac_h2osfc=torch.clamp(frac_h2osfc_new, min=0.0, max=1.0),
+    )
+
+
 def _drain_inactive_snow_storage_numpy(
     state: CoupledColumnState,
 ) -> tuple[CoupledColumnState, np.ndarray]:
@@ -832,6 +908,10 @@ REQUIRED_SURFACE_TARGETS = (
 OPTIONAL_SURFACE_TARGETS = ("hs_top_snow",)
 
 NONNEGATIVE_SURFACE_TARGETS = {
+    "sabg_soil",
+    "sabg_snow_top",
+    "cgrnds",
+    "cgrndl",
     "fpsn_patch",
     "laisun_patch",
     "laisha_patch",
@@ -924,6 +1004,9 @@ CPLIQ = 4188.0
 TFRZ = 273.15
 SECSPDAY = 86400.0
 EPSILON_WATER_VAPOR = 0.622
+WATER_VAPOR_GAS_CONSTANT = 461.5  # J kg-1 K-1
+GRAVITY = 9.80616  # m s-2
+ROVERG_MM_K = WATER_VAPOR_GAS_CONSTANT / GRAVITY * 1000.0
 GPP_UMOL_TO_GC = 12.011e-6
 DT_CARBON_DAILY = 86400.0
 HFUS = 3.337e5
@@ -955,6 +1038,36 @@ def vapor_pressure_deficit_from_forcing(
     return np.maximum(saturation_vapor_pressure_pa(t) - e_actual, 0.0)
 
 
+def diagnostic_soil_surface_humidity(
+    soil_temperature: np.ndarray | float,
+    soil_matric_potential_mm: np.ndarray | float,
+    forc_pbot: np.ndarray | float,
+    forc_q: np.ndarray | float,
+) -> np.ndarray:
+    """Diagnose ELM-like soil-surface specific humidity [kg kg-1].
+
+    This is the snow-free soil branch of ``CanopyTemperatureMod`` expressed
+    only in terms of state already available to the surface emulator.
+    """
+    temperature = np.maximum(np.asarray(soil_temperature, dtype=np.float64), 1.0)
+    pressure = np.maximum(np.asarray(forc_pbot, dtype=np.float64), 1.0)
+    atmospheric_q = np.maximum(np.asarray(forc_q, dtype=np.float64), 0.0)
+    matric_potential = np.minimum(np.asarray(soil_matric_potential_mm, dtype=np.float64), 0.0)
+    vapor_pressure = np.minimum(saturation_vapor_pressure_pa(temperature), 0.99 * pressure)
+    qsat = EPSILON_WATER_VAPOR * vapor_pressure / np.maximum(
+        pressure - (1.0 - EPSILON_WATER_VAPOR) * vapor_pressure,
+        1.0e-12,
+    )
+    relative_humidity = np.exp(np.clip(matric_potential / (ROVERG_MM_K * temperature), -80.0, 0.0))
+    reduced_qsat = relative_humidity * qsat
+    qsat_for_surface = np.where(
+        (qsat > atmospheric_q) & (atmospheric_q > reduced_qsat),
+        atmospheric_q,
+        qsat,
+    )
+    return relative_humidity * qsat_for_surface
+
+
 def saturation_vapor_pressure_pa_torch(tk: torch.Tensor) -> torch.Tensor:
     """Torch saturation vapor pressure over water [Pa] from air temperature [K]."""
     tc = torch.as_tensor(tk) - TFRZ
@@ -975,6 +1088,40 @@ def vapor_pressure_deficit_from_forcing_torch(
     denom = torch.clamp(eps + (1.0 - eps) * q, min=1.0e-12)
     e_actual = q * p / denom
     return torch.clamp(saturation_vapor_pressure_pa_torch(t) - e_actual, min=0.0)
+
+
+def diagnostic_soil_surface_humidity_torch(
+    soil_temperature: torch.Tensor,
+    soil_matric_potential_mm: torch.Tensor,
+    forc_pbot: torch.Tensor,
+    forc_q: torch.Tensor,
+) -> torch.Tensor:
+    """Torch equivalent of :func:`diagnostic_soil_surface_humidity`."""
+    temperature = torch.clamp(torch.as_tensor(soil_temperature), min=1.0)
+    pressure = torch.clamp(torch.as_tensor(forc_pbot, device=temperature.device, dtype=temperature.dtype), min=1.0)
+    atmospheric_q = torch.clamp(torch.as_tensor(forc_q, device=temperature.device, dtype=temperature.dtype), min=0.0)
+    matric_potential = torch.clamp(
+        torch.as_tensor(soil_matric_potential_mm, device=temperature.device, dtype=temperature.dtype),
+        max=0.0,
+    )
+    vapor_pressure = torch.minimum(
+        saturation_vapor_pressure_pa_torch(temperature),
+        0.99 * pressure,
+    )
+    eps = torch.as_tensor(EPSILON_WATER_VAPOR, device=temperature.device, dtype=temperature.dtype)
+    qsat = eps * vapor_pressure / torch.clamp(
+        pressure - (1.0 - eps) * vapor_pressure,
+        min=1.0e-12,
+    )
+    roverg = torch.as_tensor(ROVERG_MM_K, device=temperature.device, dtype=temperature.dtype)
+    relative_humidity = torch.exp(torch.clamp(matric_potential / (roverg * temperature), min=-80.0, max=0.0))
+    reduced_qsat = relative_humidity * qsat
+    qsat_for_surface = torch.where(
+        (qsat > atmospheric_q) & (atmospheric_q > reduced_qsat),
+        atmospheric_q,
+        qsat,
+    )
+    return relative_humidity * qsat_for_surface
 SNOW_WATER_TO_DEPTH = 100.0  # mm H2O to m snow depth for fresh snow at ~100 kg/m^3
 SNOW_GEOMETRY_MAX_DEPTH = 10.0
 SNOW_GEOMETRY_MIN_DENSITY = 50.0
@@ -2144,7 +2291,14 @@ def postprocess_surface_predictions_torch(
 
 
 def _ensure_surface_targets(bundle: SurfaceModelBundle, targets: Mapping[str, np.ndarray]) -> None:
-    missing = [name for name in REQUIRED_SURFACE_TARGETS if name not in targets]
+    required = list(REQUIRED_SURFACE_TARGETS)
+    if has_energy_closed_soil_targets(targets):
+        required = [name for name in required if name not in {"hs_soil", "dhsdT"}]
+    if has_energy_closed_surface_targets(targets):
+        required = [
+            name for name in required if name not in {"hs_top_snow", "hs_h2osfc"}
+        ]
+    missing = [name for name in required if name not in targets]
     if missing:
         raise KeyError(
             "Surface model is missing required coupled targets: " + ", ".join(missing)
@@ -5309,6 +5463,60 @@ def update_snow_state(
             torch.maximum(int_snow_new, snow_new),
             torch.zeros_like(int_snow_new),
         )
+        if (
+            not scalar_snow_only
+            and _SNICAR_AGING_TABLES is not None
+            and snow_layers_new.snw_rds is not None
+        ):
+            ice_l = torch.as_tensor(snow_layers_new.h2osoi_ice, device=device, dtype=dtype)
+            liq_l = torch.as_tensor(snow_layers_new.h2osoi_liq, device=device, dtype=dtype)
+            dz_l = torch.clamp(
+                torch.as_tensor(snow_layers_new.dz, device=device, dtype=dtype),
+                min=1.0e-6,
+            )
+            temp_l = torch.as_tensor(snow_layers_new.t_snow, device=device, dtype=dtype)
+            snl_l = torch.as_tensor(snow_layers_new.snl, device=device, dtype=torch.int32)
+            frac_l = torch.clamp(frac_sno_new[..., None], min=1.0e-12, max=1.0)
+            rho_l = torch.clamp((ice_l + liq_l) / (dz_l * frac_l), min=50.0)
+            temp_grad_l = torch.zeros_like(temp_l)
+            if temp_l.shape[-1] > 1:
+                midpoint = 0.5 * (dz_l[..., :-1] + dz_l[..., 1:])
+                temp_grad_l[..., :-1] = torch.abs(
+                    (temp_l[..., :-1] - temp_l[..., 1:])
+                    / torch.clamp(midpoint * frac_l, min=1.0e-6)
+                )
+            mass_l = ice_l + liq_l
+            frac_liq_l = torch.where(
+                mass_l > 0.0,
+                torch.clamp(liq_l / torch.clamp(mass_l, min=1.0e-12), min=0.0, max=0.1),
+                torch.zeros_like(mass_l),
+            )
+            frac_newsnow_l = torch.zeros_like(temp_l)
+            top_mass = torch.clamp(ice_l[..., 0] + liq_l[..., 0], min=1.0e-12)
+            frac_newsnow_l[..., 0] = torch.where(
+                snl_l < 0,
+                torch.clamp(forc_snow * float(dt) / top_mass, min=0.0, max=1.0),
+                torch.zeros_like(top_mass),
+            )
+            new_rds = snow_grain_aging_step_torch(
+                torch.as_tensor(snow_layers_new.snw_rds, device=device, dtype=dtype),
+                temp_l,
+                temp_grad_l,
+                rho_l,
+                frac_liq_l,
+                frac_newsnow_l,
+                torch.zeros_like(temp_l),
+                snl_l,
+                dt,
+            )
+            snow_layers_new = SnowLayerState(
+                snl=snow_layers_new.snl,
+                dz=snow_layers_new.dz,
+                h2osoi_ice=snow_layers_new.h2osoi_ice,
+                h2osoi_liq=snow_layers_new.h2osoi_liq,
+                t_snow=snow_layers_new.t_snow,
+                snw_rds=new_rds,
+            )
         out_state = CoupledColumnState(
             h2osoi_liq=_to_torch(state.h2osoi_liq, device, dtype),
             h2osoi_ice=_to_torch(state.h2osoi_ice, device, dtype),
@@ -5605,6 +5813,7 @@ def update_snow_state(
 #: :func:`load_snicar_aging_tables` before the first call to
 #: :func:`snow_grain_aging_step`.
 _SNICAR_AGING_TABLES: dict[str, np.ndarray] | None = None
+_SNICAR_AGING_TABLES_TORCH: dict[tuple[str, torch.dtype], dict[str, torch.Tensor]] = {}
 
 
 def load_snicar_aging_tables(path: str | Path) -> None:
@@ -5615,16 +5824,54 @@ def load_snicar_aging_tables(path: str | Path) -> None:
     path:
         Path to ``snicar_drdt_bst_fit_60_c070416.nc`` (or equivalent).  The
         file must contain variables ``tau`` [hr], ``kappa`` [–], and
-        ``drdsdt0`` [µm hr-1], each of shape ``(idx_rhos, idx_Tgrd, idx_T)``
-        = ``(8, 31, 11)``.
+        ``drdsdt0`` [µm hr-1]. Standard ELM NetCDF files expose these as
+        ``(T, dTdz, sno_dns) = (11, 31, 8)``; they are transposed on load to
+        the native Fortran lookup order ``(sno_dns, dTdz, T) = (8, 31, 11)``.
     """
     global _SNICAR_AGING_TABLES
     with Dataset(str(path)) as ds:
+        def _read_table(name: str) -> np.ndarray:
+            var = ds.variables[name]
+            value = np.asarray(var[:], dtype=np.float64)
+            dimensions = tuple(var.dimensions)
+            if dimensions == ("T", "dTdz", "sno_dns"):
+                value = np.transpose(value, (2, 1, 0))
+            if value.shape != (8, 31, 11):
+                raise ValueError(
+                    f"SNICAR variable {name!r} has dimensions {dimensions} and shape "
+                    f"{value.shape}; expected native lookup shape (8, 31, 11)"
+                )
+            return value
+
         _SNICAR_AGING_TABLES = {
-            "tau":   np.asarray(ds.variables["tau"][:],     dtype=np.float64),  # (8,31,11)
-            "kappa": np.asarray(ds.variables["kappa"][:],   dtype=np.float64),
-            "drdt0": np.asarray(ds.variables["drdsdt0"][:], dtype=np.float64),  # µm hr-1
+            "tau": _read_table("tau"),
+            "kappa": _read_table("kappa"),
+            "drdt0": _read_table("drdsdt0"),
         }
+    _SNICAR_AGING_TABLES_TORCH.clear()
+
+
+def snicar_aging_tables_loaded() -> bool:
+    """Return whether the snow grain-aging lookup tables are configured."""
+    return _SNICAR_AGING_TABLES is not None
+
+
+def _snicar_aging_tables_torch(
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, torch.Tensor] | None:
+    """Return cached Torch copies of the configured SNICAR aging tables."""
+    if _SNICAR_AGING_TABLES is None:
+        return None
+    key = (str(device), dtype)
+    cached = _SNICAR_AGING_TABLES_TORCH.get(key)
+    if cached is None:
+        cached = {
+            name: torch.as_tensor(value, device=device, dtype=dtype)
+            for name, value in _SNICAR_AGING_TABLES.items()
+        }
+        _SNICAR_AGING_TABLES_TORCH[key] = cached
+    return cached
 
 
 def snow_grain_aging_step(
@@ -5723,6 +5970,80 @@ def snow_grain_aging_step(
         rds_new[:, k] = np.where(act > k, rds_new[:, k], 0.0)
 
     return rds_new.reshape(shape + (nlyr,))
+
+
+def snow_grain_aging_step_torch(
+    snw_rds: torch.Tensor,
+    t_snow: torch.Tensor,
+    dTdz: torch.Tensor,
+    rhos: torch.Tensor,
+    frc_liq: torch.Tensor,
+    frc_newsnow: torch.Tensor,
+    frc_refrz: torch.Tensor,
+    active: torch.Tensor,
+    dt: float,
+) -> torch.Tensor:
+    """Torch equivalent of :func:`snow_grain_aging_step`."""
+    device = snw_rds.device
+    dtype = snw_rds.dtype
+    tables = _snicar_aging_tables_torch(device, dtype)
+    if tables is None:
+        return snw_rds
+
+    rds = snw_rds
+    temp = t_snow
+    temp_grad = dTdz
+    rho = torch.clamp(rhos, min=50.0)
+    liq = torch.clamp(frc_liq, min=0.0, max=0.1)
+    fresh = torch.clamp(frc_newsnow, min=0.0, max=1.0)
+    refrozen = torch.clamp(frc_refrz, min=0.0, max=1.0)
+
+    temp_idx = torch.clamp(torch.round((temp - 223.0) / 5.0).to(torch.long), min=0, max=10)
+    grad_idx = torch.clamp(torch.round(temp_grad / 10.0).to(torch.long), min=0, max=30)
+    rho_idx = torch.clamp(torch.round((rho - 50.0) / 50.0).to(torch.long), min=0, max=7)
+
+    tau = tables["tau"][rho_idx, grad_idx, temp_idx]
+    kappa = tables["kappa"][rho_idx, grad_idx, temp_idx]
+    drdt0 = tables["drdt0"][rho_idx, grad_idx, temp_idx]
+    dr_fresh = torch.clamp(rds - SNW_RDS_MIN, min=0.0)
+    tau_safe = torch.clamp(tau, min=1.0e-12)
+    dr_dry = (
+        drdt0
+        * torch.pow(
+            tau_safe / (dr_fresh + tau_safe),
+            1.0 / torch.clamp(kappa, min=1.0e-12),
+        )
+        * (float(dt) / 3600.0)
+    )
+
+    rds_safe = torch.clamp(rds, min=SNW_RDS_MIN)
+    dr_wet = (
+        1.0e18
+        * (float(dt) * C2_LIQ_BRUN89 * liq**3)
+        / (4.0 * math.pi * rds_safe**2)
+    )
+
+    fraction_sum = fresh + refrozen
+    overflow = fraction_sum > 1.0
+    refrozen = torch.where(
+        overflow,
+        refrozen / torch.clamp(fraction_sum, min=1.0e-12),
+        refrozen,
+    )
+    fresh = torch.where(overflow, 1.0 - refrozen, fresh)
+    old = 1.0 - fresh - refrozen
+    rds_new = torch.clamp(
+        (rds + dr_dry + dr_wet) * old
+        + SNW_RDS_MIN * fresh
+        + SNW_RDS_REFRZ * refrozen,
+        min=SNW_RDS_MIN,
+        max=SNW_RDS_MAX,
+    )
+
+    n_active = torch.clamp(-active.to(torch.long), min=0)
+    layer_index = torch.arange(rds.shape[-1], device=device)
+    layer_index = layer_index.reshape((1,) * n_active.ndim + (rds.shape[-1],))
+    return torch.where(layer_index < n_active[..., None], rds_new, torch.zeros_like(rds_new))
 
 
 def _snow_albedo_from_grain_radius(snw_rds_top: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -7057,6 +7378,7 @@ def apply_snow_water_and_capping(
     snow_melt: np.ndarray | torch.Tensor | None,
     *,
     rain_to_snowpack: np.ndarray | torch.Tensor | None = None,
+    dt: float | None = None,
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> SnowWaterResult:
@@ -7068,7 +7390,21 @@ def apply_snow_water_and_capping(
     ``H2OSNO_MAX`` by removing excess mass from the bottom snow layer. The
     returned ``qflx_snow_to_soil`` is the liquid mass exiting the bottom of
     the snowpack during this step.
+
+    Native ELM advances ``SnowWater`` every land-model timestep.  Regional
+    replay may aggregate the thermal/hydrology solve to a longer interval, but
+    one snow-water routing sweep is not timestep invariant: the receiving-layer
+    capacity limit allows liquid to advance only one layer per sweep.  When
+    ``dt`` is supplied, distribute rain/melt over 30-minute-or-shorter
+    substeps so a 3-hour replay step has the same six routing opportunities as
+    native ELM.  Calls that omit ``dt`` retain the historical single-sweep
+    behavior used by focused unit operations.
     """
+    transport_substeps = (
+        1
+        if dt is None
+        else max(1, int(math.ceil(max(float(dt), 0.0) / SNOW_UPDATE_MAX_DT)))
+    )
     if isinstance(snow_melt, torch.Tensor) or isinstance(rain_to_snowpack, torch.Tensor) or any(
         isinstance(v, torch.Tensor) for v in (state.h2osno, state.snow_depth, state.snow_t, getattr(state.snow_layers, "snl", None)) if v is not None
     ):
@@ -7105,6 +7441,8 @@ def apply_snow_water_and_capping(
         dz = torch.as_tensor(snow_layers.dz, device=device, dtype=dtype).clone()
         snl = torch.as_tensor(snow_layers.snl, device=device, dtype=torch.int32)
         t_snow = torch.as_tensor(snow_layers.t_snow, device=device, dtype=dtype)
+        rds_in = getattr(snow_layers, "snw_rds", None)
+        rds = torch.as_tensor(rds_in, device=device, dtype=dtype) if rds_in is not None else None
         frac_sno_eff = torch.clamp(
             _snow_batch_like_torch(state.frac_sno, tuple(snl.shape), device=device, dtype=dtype),
             min=1.0e-12,
@@ -7147,84 +7485,86 @@ def apply_snow_water_and_capping(
             )
             dz[..., 0] = torch.where(scalar_snow, scalar_depth, dz[..., 0])
 
-        if torch.any(rain_mass > 0.0) and torch.any(nsnow > 0):
-            liq[..., 0] = liq[..., 0] + torch.where(nsnow > 0, rain_mass, torch.zeros_like(rain_mass))
+        rain_substep = rain_mass / float(transport_substeps)
+        melt_substep = melt / float(transport_substeps)
+        for _ in range(transport_substeps):
+            if torch.any(rain_substep > 0.0) and torch.any(nsnow > 0):
+                liq[..., 0] = liq[..., 0] + torch.where(nsnow > 0, rain_substep, torch.zeros_like(rain_substep))
 
-        # Convert thermodynamic melt into liquid within the snowpack, using the
-        # uppermost layers first.
-        if torch.any(melt > 0.0) and torch.any(nsnow > 0):
-            remaining = melt.clone()
+            # Convert this substep's thermodynamic melt into snow liquid, using
+            # the uppermost layers first.
+            if torch.any(melt_substep > 0.0) and torch.any(nsnow > 0):
+                remaining = melt_substep.clone()
+                for k in range(MAX_SNOW_LAYERS):
+                    layer_mask = nsnow > k
+                    if not torch.any(layer_mask):
+                        continue
+                    convert = torch.where(
+                        layer_mask,
+                        torch.minimum(remaining, torch.clamp(ice[..., k], min=0.0)),
+                        torch.zeros_like(remaining),
+                    )
+                    ice[..., k] = torch.clamp(ice[..., k] - convert, min=0.0)
+                    liq[..., k] = liq[..., k] + convert
+                    remaining = torch.clamp(remaining - convert, min=0.0)
+                if torch.any(remaining > 0.0):
+                    liq[..., 0] = liq[..., 0] + torch.where(nsnow > 0, remaining, torch.zeros_like(remaining))
+
+            # Route excess liquid downward one native-style sweep per substep.
             for k in range(MAX_SNOW_LAYERS):
                 layer_mask = nsnow > k
                 if not torch.any(layer_mask):
                     continue
-                convert = torch.minimum(remaining, torch.clamp(ice[..., k], min=0.0))
-                ice[..., k] = torch.clamp(ice[..., k] - convert, min=0.0)
-                liq[..., k] = liq[..., k] + convert
-                remaining = torch.clamp(remaining - convert, min=0.0)
-            if torch.any(remaining > 0.0):
-                liq[..., 0] = liq[..., 0] + remaining
-
-        # Route excess liquid downward layer by layer.
-        for k in range(MAX_SNOW_LAYERS):
-            layer_mask = nsnow > k
-            if not torch.any(layer_mask):
-                continue
-            dzk = dz[..., k]
-            icek = torch.clamp(ice[..., k], min=0.0)
-            liqk = torch.clamp(liq[..., k], min=0.0)
-            totalk = icek + liqk
-            vol_ice = torch.where(
-                totalk > 0.0,
-                torch.clamp(icek / torch.clamp(dzk * frac_sno_eff * DENICE, min=1.0e-12), max=1.0),
-                torch.zeros_like(totalk),
-            )
-            eff_porosity = torch.clamp(1.0 - vol_ice, min=0.0)
-            vol_liq = torch.where(
-                totalk > 0.0,
-                torch.minimum(
-                    eff_porosity,
-                    liqk / torch.clamp(dzk * frac_sno_eff * DENH2O, min=1.0e-12),
-                ),
-                torch.zeros_like(totalk),
-            )
-            qout = torch.clamp((vol_liq - SNOW_IRREDUCIBLE_SAT * eff_porosity) * dzk * frac_sno_eff * DENH2O, min=0.0)
-            if k < MAX_SNOW_LAYERS - 1:
-                # next_mask: per-element flag for whether the next layer is active.
-                # Liquid drains to layer k+1 where it is active; otherwise it exits
-                # the snowpack bottom and goes directly to soil.
-                next_mask = nsnow > (k + 1)
-                if torch.any(next_mask):
-                    next_dz = dz[..., k + 1]
-                    next_ice = torch.clamp(ice[..., k + 1], min=0.0)
-                    next_liq = torch.clamp(liq[..., k + 1], min=0.0)
-                    next_total = next_ice + next_liq
-                    next_vol_ice = torch.where(
-                        next_total > 0.0,
-                        torch.clamp(next_ice / torch.clamp(next_dz * frac_sno_eff * DENICE, min=1.0e-12), max=1.0),
-                        torch.zeros_like(next_total),
-                    )
-                    next_eff_porosity = torch.clamp(1.0 - next_vol_ice, min=0.0)
-                    next_vol_liq = torch.where(
-                        next_total > 0.0,
-                        torch.minimum(
-                            next_eff_porosity,
-                            next_liq / torch.clamp(next_dz * frac_sno_eff * DENH2O, min=1.0e-12),
-                        ),
-                        torch.zeros_like(next_total),
-                    )
-                    next_capacity = torch.clamp(
-                        (1.0 - next_vol_ice - next_vol_liq) * next_dz * frac_sno_eff * DENH2O,
-                        min=0.0,
-                    )
-                    # Only apply capacity limit for elements where the next layer is active.
-                    qout = torch.where(next_mask, torch.minimum(qout, next_capacity), qout)
-                # Route to layer k+1 where active; drain to soil where k is the last active layer.
-                liq[..., k + 1] = liq[..., k + 1] + torch.where(next_mask, qout, torch.zeros_like(qout))
-                q_snow_to_soil = q_snow_to_soil + torch.where(next_mask, torch.zeros_like(qout), qout)
-            else:
-                q_snow_to_soil = q_snow_to_soil + qout
-            liq[..., k] = torch.clamp(liq[..., k] - qout, min=0.0)
+                dzk = dz[..., k]
+                icek = torch.clamp(ice[..., k], min=0.0)
+                liqk = torch.clamp(liq[..., k], min=0.0)
+                totalk = icek + liqk
+                vol_ice = torch.where(
+                    totalk > 0.0,
+                    torch.clamp(icek / torch.clamp(dzk * frac_sno_eff * DENICE, min=1.0e-12), max=1.0),
+                    torch.zeros_like(totalk),
+                )
+                eff_porosity = torch.clamp(1.0 - vol_ice, min=0.0)
+                vol_liq = torch.where(
+                    totalk > 0.0,
+                    torch.minimum(
+                        eff_porosity,
+                        liqk / torch.clamp(dzk * frac_sno_eff * DENH2O, min=1.0e-12),
+                    ),
+                    torch.zeros_like(totalk),
+                )
+                qout = torch.clamp((vol_liq - SNOW_IRREDUCIBLE_SAT * eff_porosity) * dzk * frac_sno_eff * DENH2O, min=0.0)
+                if k < MAX_SNOW_LAYERS - 1:
+                    next_mask = nsnow > (k + 1)
+                    if torch.any(next_mask):
+                        next_dz = dz[..., k + 1]
+                        next_ice = torch.clamp(ice[..., k + 1], min=0.0)
+                        next_liq = torch.clamp(liq[..., k + 1], min=0.0)
+                        next_total = next_ice + next_liq
+                        next_vol_ice = torch.where(
+                            next_total > 0.0,
+                            torch.clamp(next_ice / torch.clamp(next_dz * frac_sno_eff * DENICE, min=1.0e-12), max=1.0),
+                            torch.zeros_like(next_total),
+                        )
+                        next_eff_porosity = torch.clamp(1.0 - next_vol_ice, min=0.0)
+                        next_vol_liq = torch.where(
+                            next_total > 0.0,
+                            torch.minimum(
+                                next_eff_porosity,
+                                next_liq / torch.clamp(next_dz * frac_sno_eff * DENH2O, min=1.0e-12),
+                            ),
+                            torch.zeros_like(next_total),
+                        )
+                        next_capacity = torch.clamp(
+                            (1.0 - next_vol_ice - next_vol_liq) * next_dz * frac_sno_eff * DENH2O,
+                            min=0.0,
+                        )
+                        qout = torch.where(next_mask, torch.minimum(qout, next_capacity), qout)
+                    liq[..., k + 1] = liq[..., k + 1] + torch.where(next_mask, qout, torch.zeros_like(qout))
+                    q_snow_to_soil = q_snow_to_soil + torch.where(next_mask, torch.zeros_like(qout), qout)
+                else:
+                    q_snow_to_soil = q_snow_to_soil + qout
+                liq[..., k] = torch.clamp(liq[..., k] - qout, min=0.0)
 
         h2osno_new = torch.sum(torch.clamp(ice + liq, min=0.0), dim=-1)
 
@@ -7264,6 +7604,7 @@ def apply_snow_water_and_capping(
             h2osoi_ice=ice,
             h2osoi_liq=liq,
             t_snow=t_snow,
+            snw_rds=rds,
         )
         snow_depth_new = _snow_depth_from_layers_torch(snow_layers_new, device=device, dtype=dtype)
         state_frac_sno = torch.clamp(
@@ -7342,6 +7683,8 @@ def apply_snow_water_and_capping(
     dz = np.array(snow_layers.dz, dtype=np.float64, copy=True)
     snl = np.asarray(snow_layers.snl, dtype=np.int32)
     t_snow = np.asarray(snow_layers.t_snow, dtype=np.float64)
+    rds_in = getattr(snow_layers, "snw_rds", None)
+    rds = np.asarray(rds_in, dtype=np.float64) if rds_in is not None else None
     frac_sno_eff = np.clip(_snow_batch_like_numpy(_to_np(state.frac_sno), snl.shape), 1.0e-12, 1.0)
     nsnow = np.maximum(-snl.astype(np.int32), 0)
     inactive_scalar = (nsnow == 0) & (h2osno_old > 1.0e-8) & (np.sum(np.maximum(ice + liq, 0.0), axis=-1) <= 1.0e-8)
@@ -7376,70 +7719,73 @@ def apply_snow_water_and_capping(
         )
         dz[..., 0] = np.where(scalar_snow, scalar_depth, dz[..., 0])
 
-    if np.any(rain_mass > 0.0) and np.any(nsnow > 0):
-        liq[..., 0] = liq[..., 0] + np.where(nsnow > 0, rain_mass, 0.0)
+    rain_substep = rain_mass / float(transport_substeps)
+    melt_substep = melt / float(transport_substeps)
+    for _ in range(transport_substeps):
+        if np.any(rain_substep > 0.0) and np.any(nsnow > 0):
+            liq[..., 0] = liq[..., 0] + np.where(nsnow > 0, rain_substep, 0.0)
 
-    if np.any(melt > 0.0) and np.any(nsnow > 0):
-        remaining = melt.copy()
+        if np.any(melt_substep > 0.0) and np.any(nsnow > 0):
+            remaining = melt_substep.copy()
+            for k in range(MAX_SNOW_LAYERS):
+                layer_mask = nsnow > k
+                if not np.any(layer_mask):
+                    continue
+                convert = np.where(
+                    layer_mask,
+                    np.minimum(remaining, np.maximum(ice[..., k], 0.0)),
+                    0.0,
+                )
+                ice[..., k] = np.maximum(ice[..., k] - convert, 0.0)
+                liq[..., k] = liq[..., k] + convert
+                remaining = np.maximum(remaining - convert, 0.0)
+            if np.any(remaining > 0.0):
+                liq[..., 0] = liq[..., 0] + np.where(nsnow > 0, remaining, 0.0)
+
         for k in range(MAX_SNOW_LAYERS):
             if not np.any(nsnow > k):
                 continue
-            convert = np.minimum(remaining, np.maximum(ice[..., k], 0.0))
-            ice[..., k] = np.maximum(ice[..., k] - convert, 0.0)
-            liq[..., k] = liq[..., k] + convert
-            remaining = np.maximum(remaining - convert, 0.0)
-        if np.any(remaining > 0.0):
-            liq[..., 0] = liq[..., 0] + remaining
-
-    for k in range(MAX_SNOW_LAYERS):
-        if not np.any(nsnow > k):
-            continue
-        dzk = dz[..., k]
-        icek = np.maximum(ice[..., k], 0.0)
-        liqk = np.maximum(liq[..., k], 0.0)
-        totalk = icek + liqk
-        vol_ice = np.where(
-            totalk > 0.0,
-            np.minimum(1.0, icek / np.maximum(dzk * frac_sno_eff * DENICE, 1.0e-12)),
-            0.0,
-        )
-        eff_porosity = np.maximum(1.0 - vol_ice, 0.0)
-        vol_liq = np.where(
-            totalk > 0.0,
-            np.minimum(eff_porosity, liqk / np.maximum(dzk * frac_sno_eff * DENH2O, 1.0e-12)),
-            0.0,
-        )
-        qout = np.maximum((vol_liq - SNOW_IRREDUCIBLE_SAT * eff_porosity) * dzk * frac_sno_eff * DENH2O, 0.0)
-        if k < MAX_SNOW_LAYERS - 1:
-            # next_mask: per-element flag for whether the next layer is active.
-            # Liquid drains to layer k+1 where it is active; otherwise it exits
-            # the snowpack bottom and goes directly to soil.
-            next_mask = nsnow > (k + 1)
-            if np.any(next_mask):
-                next_dz = dz[..., k + 1]
-                next_ice = np.maximum(ice[..., k + 1], 0.0)
-                next_liq = np.maximum(liq[..., k + 1], 0.0)
-                next_total = next_ice + next_liq
-                next_vol_ice = np.where(
-                    next_total > 0.0,
-                    np.minimum(1.0, next_ice / np.maximum(next_dz * frac_sno_eff * DENICE, 1.0e-12)),
-                    0.0,
-                )
-                next_eff_porosity = np.maximum(1.0 - next_vol_ice, 0.0)
-                next_vol_liq = np.where(
-                    next_total > 0.0,
-                    np.minimum(next_eff_porosity, next_liq / np.maximum(next_dz * frac_sno_eff * DENH2O, 1.0e-12)),
-                    0.0,
-                )
-                next_capacity = np.maximum((1.0 - next_vol_ice - next_vol_liq) * next_dz * frac_sno_eff * DENH2O, 0.0)
-                # Only apply capacity limit for elements where the next layer is active.
-                qout = np.where(next_mask, np.minimum(qout, next_capacity), qout)
-            # Route to layer k+1 where active; drain to soil where k is the last active layer.
-            liq[..., k + 1] = liq[..., k + 1] + np.where(next_mask, qout, 0.0)
-            q_snow_to_soil = q_snow_to_soil + np.where(next_mask, 0.0, qout)
-        else:
-            q_snow_to_soil = q_snow_to_soil + qout
-        liq[..., k] = np.maximum(liq[..., k] - qout, 0.0)
+            dzk = dz[..., k]
+            icek = np.maximum(ice[..., k], 0.0)
+            liqk = np.maximum(liq[..., k], 0.0)
+            totalk = icek + liqk
+            vol_ice = np.where(
+                totalk > 0.0,
+                np.minimum(1.0, icek / np.maximum(dzk * frac_sno_eff * DENICE, 1.0e-12)),
+                0.0,
+            )
+            eff_porosity = np.maximum(1.0 - vol_ice, 0.0)
+            vol_liq = np.where(
+                totalk > 0.0,
+                np.minimum(eff_porosity, liqk / np.maximum(dzk * frac_sno_eff * DENH2O, 1.0e-12)),
+                0.0,
+            )
+            qout = np.maximum((vol_liq - SNOW_IRREDUCIBLE_SAT * eff_porosity) * dzk * frac_sno_eff * DENH2O, 0.0)
+            if k < MAX_SNOW_LAYERS - 1:
+                next_mask = nsnow > (k + 1)
+                if np.any(next_mask):
+                    next_dz = dz[..., k + 1]
+                    next_ice = np.maximum(ice[..., k + 1], 0.0)
+                    next_liq = np.maximum(liq[..., k + 1], 0.0)
+                    next_total = next_ice + next_liq
+                    next_vol_ice = np.where(
+                        next_total > 0.0,
+                        np.minimum(1.0, next_ice / np.maximum(next_dz * frac_sno_eff * DENICE, 1.0e-12)),
+                        0.0,
+                    )
+                    next_eff_porosity = np.maximum(1.0 - next_vol_ice, 0.0)
+                    next_vol_liq = np.where(
+                        next_total > 0.0,
+                        np.minimum(next_eff_porosity, next_liq / np.maximum(next_dz * frac_sno_eff * DENH2O, 1.0e-12)),
+                        0.0,
+                    )
+                    next_capacity = np.maximum((1.0 - next_vol_ice - next_vol_liq) * next_dz * frac_sno_eff * DENH2O, 0.0)
+                    qout = np.where(next_mask, np.minimum(qout, next_capacity), qout)
+                liq[..., k + 1] = liq[..., k + 1] + np.where(next_mask, qout, 0.0)
+                q_snow_to_soil = q_snow_to_soil + np.where(next_mask, 0.0, qout)
+            else:
+                q_snow_to_soil = q_snow_to_soil + qout
+            liq[..., k] = np.maximum(liq[..., k] - qout, 0.0)
 
     h2osno_new = np.sum(np.maximum(ice + liq, 0.0), axis=-1)
     cap_excess = np.maximum(h2osno_new - H2OSNO_MAX, 0.0)
@@ -7479,6 +7825,7 @@ def apply_snow_water_and_capping(
         h2osoi_ice=ice,
         h2osoi_liq=liq,
         t_snow=t_snow,
+        snw_rds=rds,
     )
     snow_depth_new = _snow_depth_from_layers_numpy(snow_layers_new)
     state_frac_sno = np.clip(_snow_batch_like_numpy(_to_np(state.frac_sno), h2osno_new.shape), 0.0, 1.0)
@@ -7844,21 +8191,39 @@ def build_texture_static_parameters(
     pc: float = 0.4,
     h2osfc_thresh: float | None = None,
     topo_slope: float | np.ndarray | None = None,
+    rsub_top_globalmax: float | np.ndarray | None = None,
     device: torch.device,
     dtype: torch.dtype,
 ) -> CoupledStaticParameters:
     """Build consistent hydrology and soil-thermal parameters from texture."""
     if dz is None or z is None or zi is None:
         dz, z, zi = elm_soil_grid(nlevsoi=len(texture.sand_pct))
-    nlevbed = None
-    if len(texture.sand_pct) > 10:
-        nlevbed = 10
+
+    # Keep the thermal and hydraulic vertical grids distinct.  This used to
+    # rely on regional callers replacing the 15-level hydraulic parameter
+    # object after construction, leaving other coupled entry points able to
+    # treat thermal bedrock as porous soil.
+    nlev_total = int(np.asarray(texture.sand_pct).shape[-1])
+    nlev_hydro = min(ELM_HYDROLOGY_LEVELS, nlev_total)
+    hydro_texture = SoilTextureProfile(
+        sand_pct=np.asarray(texture.sand_pct)[..., :nlev_hydro],
+        clay_pct=np.asarray(texture.clay_pct)[..., :nlev_hydro],
+        organic_frac=np.asarray(texture.organic_frac)[..., :nlev_hydro],
+    )
+    rootfr_hydro = np.asarray(rootfr, dtype=np.float64)[..., :nlev_hydro].copy()
+    rootfr_sum = rootfr_hydro.sum(axis=-1, keepdims=True)
+    rootfr_hydro = np.divide(
+        rootfr_hydro,
+        rootfr_sum,
+        out=np.zeros_like(rootfr_hydro),
+        where=rootfr_sum > 1.0e-12,
+    )
     hydro_np = hydraulic_params_from_texture(
-        dz=dz,
-        z=z,
-        zi=zi,
-        texture=texture,
-        rootfr=rootfr,
+        dz=np.asarray(dz)[..., :nlev_hydro],
+        z=np.asarray(z)[..., :nlev_hydro],
+        zi=np.asarray(zi)[..., :nlev_hydro],
+        texture=hydro_texture,
+        rootfr=rootfr_hydro,
         topo_slope=topo_slope,
     )
     if wtfact is not None:
@@ -7867,6 +8232,8 @@ def build_texture_static_parameters(
         hydro_np.fover = np.array([[fover]], dtype=np.float64)
     if h2osfc_thresh is not None:
         hydro_np.h2osfc_thresh = np.array([[h2osfc_thresh]], dtype=np.float64)
+    if rsub_top_globalmax is not None:
+        hydro_np.rsub_top_globalmax = np.asarray(rsub_top_globalmax, dtype=np.float64)
     hydro_torch = SoilWaterCoreParameters(
         dz=torch.as_tensor(hydro_np.dz, device=device, dtype=dtype),
         z=torch.as_tensor(hydro_np.z, device=device, dtype=dtype),
@@ -7882,18 +8249,28 @@ def build_texture_static_parameters(
         h2osfc_thresh=torch.as_tensor(hydro_np.h2osfc_thresh, device=device, dtype=dtype),
         pc=torch.as_tensor(hydro_np.pc, device=device, dtype=dtype),
         topo_slope=None if topo_slope is None else torch.as_tensor(topo_slope, device=device, dtype=dtype),
+        rsub_top_globalmax=(
+            None if hydro_np.rsub_top_globalmax is None
+            else torch.as_tensor(hydro_np.rsub_top_globalmax, device=device, dtype=dtype)
+        ),
     )
-    soil_np = thermal_params_from_texture(dz=dz, z=z, zi=zi, texture=texture, nlevbed=nlevbed)
+    soil_np = thermal_params_from_texture(
+        dz=dz,
+        z=z,
+        zi=zi,
+        texture=texture,
+        nlevbed=nlev_hydro,
+    )
     soil_torch = thermal_params_from_texture_torch(
         texture=texture,
         dz=dz,
         z=z,
         zi=zi,
-        nlevbed=nlevbed,
+        nlevbed=nlev_hydro,
         device=device,
         dtype=dtype,
     )
-    rootfr_np = np.asarray(rootfr, dtype=np.float64)
+    rootfr_np = rootfr_hydro
     rootfr_t = torch.as_tensor(np.maximum(rootfr_np, 0.0), device=device, dtype=dtype)
     rootfr_norm_t = rootfr_t / torch.clamp(rootfr_t.sum(), min=1.0e-12)
     return CoupledStaticParameters(
@@ -7971,16 +8348,24 @@ def predict_surface_targets(
 ) -> dict[str, np.ndarray] | dict[str, torch.Tensor]:
     already_zero_feature_names = already_zero_feature_names or frozenset()
     if isinstance(surface_features, torch.Tensor):
-        x = _to_torch(surface_features, device, dtype)
+        # Raw regional features include quantities such as soil matric
+        # potential that exceed float16's finite range.  Standardize them in
+        # float32, then cast only the dimensionless MLP input.  Besides being
+        # numerically safer, this permits a packed FP32 feature buffer to feed
+        # BF16/FP16 model weights without an intermediate raw half tensor.
+        normalization_dtype = (
+            torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
+        )
+        x = _to_torch(surface_features, device, normalization_dtype)
         x_mean = (
             bundle.x_mean_torch
-            if bundle.x_mean_torch is not None and bundle.x_mean_torch.device == device and bundle.x_mean_torch.dtype == dtype
-            else torch.as_tensor(bundle.x_mean, device=device, dtype=dtype)
+            if bundle.x_mean_torch is not None and bundle.x_mean_torch.device == device and bundle.x_mean_torch.dtype == normalization_dtype
+            else torch.as_tensor(bundle.x_mean, device=device, dtype=normalization_dtype)
         )
         x_std = (
             bundle.x_std_safe_torch
-            if bundle.x_std_safe_torch is not None and bundle.x_std_safe_torch.device == device and bundle.x_std_safe_torch.dtype == dtype
-            else torch.as_tensor(np.where(bundle.x_std > 0.0, bundle.x_std, 1.0), device=device, dtype=dtype)
+            if bundle.x_std_safe_torch is not None and bundle.x_std_safe_torch.device == device and bundle.x_std_safe_torch.dtype == normalization_dtype
+            else torch.as_tensor(np.where(bundle.x_std > 0.0, bundle.x_std, 1.0), device=device, dtype=normalization_dtype)
         )
         x_scaled = (x - x_mean) / x_std
         constant_mask = bundle.x_float32_constant_mask_torch
@@ -7989,7 +8374,7 @@ def predict_surface_targets(
                 constant_mask = constant_mask.to(device=x_scaled.device)
             x_scaled[..., constant_mask] = 0.0
         batch_shape = tuple(x_scaled.shape[:-1])
-        x2 = x_scaled.reshape(-1, x_scaled.shape[-1])
+        x2 = x_scaled.to(dtype=dtype).reshape(-1, x_scaled.shape[-1])
         input_idx_map = _bundle_input_index_map(tuple(bundle.input_names))
         target_idx_map = _bundle_input_index_map(tuple(bundle.target_names))
         with torch.inference_mode():
@@ -8411,6 +8796,7 @@ def _torch_soil_temperature_step(
     workspace: SoilTemperatureTorchWorkspace | None = None,
     allow_numpy_thermal_fallback: bool = True,
     snow_enabled: bool = True,
+    blend_partial_snow_soil_temperature: bool = False,
 ) -> tuple[SoilTemperatureResultTorch, CoupledColumnState]:
     if allow_numpy_thermal_fallback:
         if state.snow_layers is not None and getattr(state.snow_layers, "snl", None) is not None:
@@ -8442,6 +8828,16 @@ def _torch_soil_temperature_step(
         hs_h2osfc=_to_torch(surface_targets["hs_h2osfc"], device, dtype),
         dhsdT=_to_torch(surface_targets["dhsdT"], device, dtype),
         eflx_bot=torch.zeros_like(_to_torch(surface_targets["hs_soil"], device, dtype)),
+        sabg_snow_total=(
+            None
+            if "sabg_snow_total" not in surface_targets
+            else _to_torch(surface_targets["sabg_snow_total"], device, dtype)
+        ),
+        sabg_snow_top=(
+            None
+            if "sabg_snow_top" not in surface_targets
+            else _to_torch(surface_targets["sabg_snow_top"], device, dtype)
+        ),
     )
     result = soil_temperature_step_torch(
         SoilTemperatureStateTorch(
@@ -8462,6 +8858,7 @@ def _torch_soil_temperature_step(
         dt,
         workspace=workspace,
         snow_enabled=snow_enabled,
+        blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
     )
     next_state = CoupledColumnState(
         h2osoi_liq=result.state.h2osoi_liq,
@@ -8580,6 +8977,26 @@ def _merge_soil_temperature_result_torch(
             update_result.qflx_snow_freeze,
             base_result.eflx_fgr12,
         ),
+        qflx_snow_melt_profile=_cell_scatter_optional_result_tensor(
+            getattr(base_result, "qflx_snow_melt_profile", None),
+            indices,
+            getattr(update_result, "qflx_snow_melt_profile", None),
+            torch.zeros(
+                base_result.eflx_fgr12.shape + (MAX_SNOW_LAYERS,),
+                device=base_result.eflx_fgr12.device,
+                dtype=base_result.eflx_fgr12.dtype,
+            ),
+        ),
+        qflx_snow_freeze_profile=_cell_scatter_optional_result_tensor(
+            getattr(base_result, "qflx_snow_freeze_profile", None),
+            indices,
+            getattr(update_result, "qflx_snow_freeze_profile", None),
+            torch.zeros(
+                base_result.eflx_fgr12.shape + (MAX_SNOW_LAYERS,),
+                device=base_result.eflx_fgr12.device,
+                dtype=base_result.eflx_fgr12.dtype,
+            ),
+        ),
         qflx_soil_melt=_cell_scatter_optional_result_tensor(
             getattr(base_result, "qflx_soil_melt", None),
             indices,
@@ -8636,6 +9053,7 @@ def _torch_soil_temperature_step_grouped_snow(
     workspace: SoilTemperatureTorchWorkspace | None = None,
     allow_numpy_thermal_fallback: bool = False,
     snow_enabled: bool = True,
+    blend_partial_snow_soil_temperature: bool = False,
 ) -> tuple[SoilTemperatureResultTorch, CoupledColumnState]:
     if not snow_enabled:
         return _torch_soil_temperature_step(
@@ -8648,6 +9066,7 @@ def _torch_soil_temperature_step_grouped_snow(
             workspace=workspace,
             allow_numpy_thermal_fallback=allow_numpy_thermal_fallback,
             snow_enabled=False,
+            blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
         )
 
     state = _repair_snow_layer_state_shape_torch(state, device=device, dtype=dtype)
@@ -8666,6 +9085,7 @@ def _torch_soil_temperature_step_grouped_snow(
             workspace=workspace,
             allow_numpy_thermal_fallback=allow_numpy_thermal_fallback,
             snow_enabled=True,
+            blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
         )
 
     base_input_state = _state_with_inactive_snow_layers_torch(state, device=device, dtype=dtype)
@@ -8679,6 +9099,7 @@ def _torch_soil_temperature_step_grouped_snow(
         workspace=workspace,
         allow_numpy_thermal_fallback=False,
         snow_enabled=True,
+        blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
     )
 
     active_state_in = _cell_index_coupled_state(state, active_idx)
@@ -8698,6 +9119,7 @@ def _torch_soil_temperature_step_grouped_snow(
         workspace=None,
         allow_numpy_thermal_fallback=allow_numpy_thermal_fallback,
         snow_enabled=True,
+        blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
     )
     return (
         _merge_soil_temperature_result_torch(base_result, base_state, active_idx, active_result),
@@ -8722,6 +9144,7 @@ def coupled_step(
     profile_sections: dict[str, float] | None = None,
     snow_model_enabled: bool = True,
     snow_scalar_only: bool = False,
+    blend_partial_snow_soil_temperature: bool = False,
     copy_surface_features: bool = True,
     snow_state_already_disabled: bool = False,
     precomputed_surface_targets: "dict[str, np.ndarray | torch.Tensor] | None" = None,
@@ -8862,6 +9285,23 @@ def coupled_step(
                 dtype=dtype,
             ),
         )
+    # Carry diagnosed total snow absorption into the thermal solver. The MLP
+    # predicts the native top-layer term separately; their difference is the
+    # shortwave source for internal snow layers.
+    if "sabg_snow_total" not in surface_targets:
+        if "diag_sabg_snow_input" in surface_targets:
+            surface_targets["sabg_snow_total"] = surface_targets[
+                "diag_sabg_snow_input"
+            ]
+        elif precomputed_surface_targets is None:
+            snow_abs_idx = _bundle_input_index_map(tuple(bundle.input_names)).get(
+                "sabg_snow"
+            )
+            if snow_abs_idx is not None:
+                surface_targets["sabg_snow_total"] = working_features[
+                    ..., snow_abs_idx
+                ]
+
     if snow_model_enabled:
         snow_state = _profiled(
             "update_snow_state",
@@ -8880,8 +9320,14 @@ def coupled_step(
     if snow_model_enabled:
         if isinstance(snow_state.h2osno, torch.Tensor):
             snow_state = _repair_snow_fraction_depth_torch(snow_state, device=device, dtype=dtype)
+            snow_state = reconcile_snow_surface_water_fractions_torch(
+                snow_state,
+                device=device,
+                dtype=dtype,
+            )
         else:
             snow_state = _repair_snow_fraction_depth_numpy(snow_state)
+            snow_state = reconcile_snow_surface_water_fractions_numpy(snow_state)
         if snow_scalar_only:
             snow_state = (
                 force_scalar_snow_state_torch(snow_state, device=device, dtype=dtype)
@@ -8918,6 +9364,7 @@ def coupled_step(
                 workspace=soil_temperature_workspace,
                 allow_numpy_thermal_fallback=False,
                 snow_enabled=snow_model_enabled,
+                blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
             ),
         )
     else:
@@ -9041,6 +9488,7 @@ def coupled_step(
                 final_state,
                 None,
                 rain_to_snowpack=rain_to_snowpack,
+                dt=dt,
                 device=device,
                 dtype=dtype,
             ),
@@ -9128,6 +9576,16 @@ def coupled_step(
                 if isinstance(final_state.h2osno, torch.Tensor)
                 else force_scalar_snow_state_numpy(final_state)
             )
+        final_state = (
+            reconcile_snow_surface_water_fractions_torch(
+                final_state,
+                device=device,
+                dtype=dtype,
+            )
+            if isinstance(final_state.frac_h2osfc, torch.Tensor)
+            or isinstance(final_state.frac_sno, torch.Tensor)
+            else reconcile_snow_surface_water_fractions_numpy(final_state)
+        )
         # qflx_snow_to_soil is kg/m² (mass per step); convert to kg/m²/s for
         # the hydrology top-soil flux. Native ELM sends only bare-fraction
         # rain directly to soil; snowfall is already in h2osno, and rain over
@@ -9234,8 +9692,14 @@ def coupled_step(
     if snow_model_enabled:
         if isinstance(final_state.h2osno, torch.Tensor):
             final_state = _repair_snow_fraction_depth_torch(final_state, device=device, dtype=dtype)
+            final_state = reconcile_snow_surface_water_fractions_torch(
+                final_state,
+                device=device,
+                dtype=dtype,
+            )
         else:
             final_state = _repair_snow_fraction_depth_numpy(final_state)
+            final_state = reconcile_snow_surface_water_fractions_numpy(final_state)
         if snow_scalar_only:
             final_state = (
                 force_scalar_snow_state_torch(final_state, device=device, dtype=dtype)
@@ -9347,6 +9811,37 @@ def coupled_step(
                     0.0,
                 )
 
+    coupled_output_state = CoupledColumnState(
+        h2osoi_liq=hydro_state.h2osoi_liq,
+        h2osoi_ice=hydro_state.h2osoi_ice,
+        h2ocan=hydro_state.h2ocan,
+        h2osfc=hydro_state.h2osfc,
+        frac_h2osfc=hydro_state.frac_h2osfc,
+        zwt=hydro_state.zwt,
+        wa=hydro_state.wa,
+        t_soisno=final_state.t_soisno,
+        t_h2osfc=final_state.t_h2osfc,
+        t10=final_state.t10,
+        t10_history=final_state.t10_history,
+        h2osno=h2osno_final,
+        snow_depth=snow_depth_final,
+        frac_sno=frac_sno_final,
+        snow_t=snow_t_final,
+        snow_layers=snow_layers_final,
+        int_snow=int_snow_final,
+    )
+    if snow_model_enabled:
+        coupled_output_state = (
+            reconcile_snow_surface_water_fractions_torch(
+                coupled_output_state,
+                device=device,
+                dtype=dtype,
+            )
+            if isinstance(coupled_output_state.frac_h2osfc, torch.Tensor)
+            or isinstance(coupled_output_state.frac_sno, torch.Tensor)
+            else reconcile_snow_surface_water_fractions_numpy(coupled_output_state)
+        )
+
     return CoupledStepResult(
         surface_targets=surface_targets,
         hydrology_backend=hydrology_backend,
@@ -9354,25 +9849,7 @@ def coupled_step(
         hydrology_result=hydrology_result,
         soil_temperature_result=soil_result,
         qflx_snow_to_soil=qflx_snow_to_soil,
-        state=CoupledColumnState(
-            h2osoi_liq=hydro_state.h2osoi_liq,
-            h2osoi_ice=hydro_state.h2osoi_ice,
-            h2ocan=hydro_state.h2ocan,
-            h2osfc=hydro_state.h2osfc,
-            frac_h2osfc=hydro_state.frac_h2osfc,
-            zwt=hydro_state.zwt,
-            wa=hydro_state.wa,
-            t_soisno=final_state.t_soisno,
-            t_h2osfc=final_state.t_h2osfc,
-            t10=final_state.t10,
-            t10_history=final_state.t10_history,
-            h2osno=h2osno_final,
-            snow_depth=snow_depth_final,
-            frac_sno=frac_sno_final,
-            snow_t=snow_t_final,
-            snow_layers=snow_layers_final,
-            int_snow=int_snow_final,
-        ),
+        state=coupled_output_state,
         canopy_state=canopy_state,
         snow_state=snow_state,
         thermal_state=thermal_state,
@@ -9679,6 +10156,14 @@ def build_surface_features_from_inputs(
     t10 = coupled_t10_from_state(state)
     feature_frac_sno = _total_snow_fraction_numpy(state)
     feature_snow_depth = _total_snow_depth_numpy(state)
+    feature_h2osno = np.asarray(snow_storage_from_state(state), dtype=np.float64)
+    if state.snow_layers is not None:
+        feature_snow_layer_count = np.maximum(
+            -np.asarray(state.snow_layers.snl, dtype=np.int32), 0
+        ).astype(np.float64)
+    else:
+        feature_snow_layer_count = (feature_h2osno > 0.0).astype(np.float64)
+    feature_t_snow_top = _snow_top_temp_from_state(state)
 
     updates: dict[str, np.ndarray | float] = {
         "forc_t": atmosphere.forc_t,
@@ -9688,6 +10173,12 @@ def build_surface_features_from_inputs(
             atmosphere.forc_t,
             atmosphere.forc_q,
             atmosphere.forc_pbot,
+        ),
+        "qg_soil_diag": diagnostic_soil_surface_humidity(
+            _to_np(state.t_soisno)[..., 0],
+            soil_diag["smp_l"][..., 0],
+            atmosphere.forc_pbot,
+            atmosphere.forc_q,
         ),
         "forc_lwrad": atmosphere.forc_lwrad,
         "forc_rain": atmosphere.forc_rain,
@@ -9717,6 +10208,10 @@ def build_surface_features_from_inputs(
         "t_grnd": t_grnd,
         "t_h2osfc": _to_np(state.t_h2osfc) if state.t_h2osfc is not None else _to_np(state.t_soisno)[..., 0],
         "ugust": geometry.ugust,
+        "h2osfc": _to_np(state.h2osfc),
+        "h2osno": feature_h2osno,
+        "snow_layer_count": feature_snow_layer_count,
+        "t_snow_top": feature_t_snow_top,
         "pft_type": 0.0 if static.pft_type is None else static.pft_type,
         "smpso": 0.0 if static.smpso is None else static.smpso,
         "smpsc": 0.0 if static.smpsc is None else static.smpsc,
@@ -9767,6 +10262,9 @@ def build_surface_features_from_inputs(
         updates["forc_snow"] = np.zeros_like(np.asarray(atmosphere.forc_snow, dtype=np.float64))
         updates["frac_sno"] = np.zeros_like(_to_np(state.frac_sno))
         updates["snow_depth"] = np.zeros_like(_to_np(state.snow_depth) if state.snow_depth is not None else np.asarray(vegetation.snow_depth, dtype=np.float64))
+        updates["h2osno"] = np.zeros_like(feature_h2osno)
+        updates["snow_layer_count"] = np.zeros_like(feature_snow_layer_count)
+        updates["t_snow_top"] = _to_np(state.t_soisno)[..., 0]
         if "sabg_snow" in bundle.input_names:
             updates["sabg_snow"] = _absorbed_ground_shortwave(
                 atmosphere.forc_swrad,
@@ -9875,6 +10373,19 @@ def build_surface_features_from_inputs_torch(
     assert isinstance(eff_porosity, torch.Tensor)
     assert isinstance(smp_l, torch.Tensor)
     nlev_hydro = int(liqvol.shape[-1])
+    h2osno_t = _to_torch(snow_storage_from_state(state), device, dtype)
+    if state.snow_layers is not None:
+        snow_layer_count_t = torch.clamp(
+            -torch.as_tensor(state.snow_layers.snl, device=device, dtype=torch.int32), min=0
+        ).to(dtype=dtype)
+        t_snow_top_t = _to_torch(state.snow_layers.t_snow[..., 0], device, dtype)
+    elif state.snow_t is not None:
+        snow_layer_count_t = (h2osno_t > 0.0).to(dtype=dtype)
+        t_snow_top_t = _to_torch(state.snow_t[..., 0], device, dtype)
+    else:
+        snow_layer_count_t = torch.zeros_like(h2osno_t)
+        t_snow_top_t = t_soisno_t[..., 0]
+    t_snow_top_t = torch.where(snow_layer_count_t > 0.0, t_snow_top_t, t_soisno_t[..., 0])
 
     forc_t_t = _to_torch(atmosphere.forc_t, device, dtype)
     forc_q_t = _to_torch(atmosphere.forc_q, device, dtype)
@@ -9887,6 +10398,12 @@ def build_surface_features_from_inputs_torch(
             forc_t_t,
             forc_q_t,
             forc_pbot_t,
+        ),
+        "qg_soil_diag": diagnostic_soil_surface_humidity_torch(
+            t_soisno_t[..., 0],
+            smp_l[..., 0],
+            forc_pbot_t,
+            forc_q_t,
         ),
         "forc_lwrad": _to_torch(atmosphere.forc_lwrad, device, dtype),
         "forc_rain": _to_torch(atmosphere.forc_rain, device, dtype),
@@ -9916,6 +10433,10 @@ def build_surface_features_from_inputs_torch(
         "t_grnd": t_grnd,
         "t_h2osfc": t_h2osfc_t,
         "ugust": _to_torch(geometry.ugust, device, dtype),
+        "h2osfc": h2osfc_t,
+        "h2osno": h2osno_t,
+        "snow_layer_count": snow_layer_count_t,
+        "t_snow_top": t_snow_top_t,
     }
     if update_static_features:
         updates.update({
@@ -9981,6 +10502,9 @@ def build_surface_features_from_inputs_torch(
         updates["forc_snow"] = torch.zeros(batch_shape, device=device, dtype=dtype)
         updates["frac_sno"] = torch.zeros(batch_shape, device=device, dtype=dtype)
         updates["snow_depth"] = torch.zeros(batch_shape, device=device, dtype=dtype)
+        updates["h2osno"] = torch.zeros(batch_shape, device=device, dtype=dtype)
+        updates["snow_layer_count"] = torch.zeros(batch_shape, device=device, dtype=dtype)
+        updates["t_snow_top"] = t_soisno_t[..., 0]
         if "sabg_snow" in bundle.input_names:
             updates["sabg_snow"] = _absorbed_ground_shortwave_torch(
                 atmosphere.forc_swrad,

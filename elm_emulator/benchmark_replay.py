@@ -44,6 +44,7 @@ from .coupled_surface_hydrology_soiltemp import (
     AtmosphericForcingInputs,
     CoupledColumnState,
     CoupledStaticParameters,
+    MAX_SNOW_LAYERS,
     SnowLayerState,
     SurfaceGeometryInputs,
     SurfaceModelBundle,
@@ -59,11 +60,15 @@ from .coupled_surface_hydrology_soiltemp import (
     coupled_state_to_cpu,
     coupled_state_to_device,
     coupled_step,
+    diagnostic_soil_surface_humidity_torch,
     force_scalar_snow_state_numpy,
     force_scalar_snow_state_torch,
+    load_snicar_aging_tables,
     load_surface_model_bundle,
     predict_surface_targets,
     select_device,
+    snicar_aging_tables_loaded,
+    _snow_albedo_from_grain_radius,
     _active_snow_depth_torch,
     _active_snow_fraction_torch,
     saturation_vapor_pressure_pa_torch,
@@ -71,6 +76,12 @@ from .coupled_surface_hydrology_soiltemp import (
     _total_snow_fraction_torch,
     _zero_snow_state,
     vapor_pressure_deficit_from_forcing_torch,
+)
+from .thermal_energy_closure import (
+    derive_surface_thermal_boundaries_torch,
+    derive_soil_thermal_boundary_torch,
+    has_energy_closed_soil_targets,
+    has_energy_closed_surface_targets,
 )
 from .elm_hydrology import elm_soil_grid
 from .elm_history import ElmHistoryWriter, infer_elm_history_case_name
@@ -114,6 +125,7 @@ from .regional_output import (
 from .regional_plotting import _filter_regional_plot_diag_maps, _plot_diag_maps
 
 STEFAN_BOLTZMANN = 5.670374419e-8
+SNICAR_AGING_FILENAME = "snicar_drdt_bst_fit_60_c070416.nc"
 
 STATIC_PARAMETER_FEATURE_NAMES = (
     "pft_type",
@@ -1394,6 +1406,27 @@ def _resolve_regional_co2_file(co2_file: Path | None, met_dir: Path) -> Path | N
         return default_path
     return None
 
+
+def _resolve_snicar_aging_file(
+    explicit_path: Path | None,
+    clm_params: Path | None,
+) -> Path | None:
+    """Locate the ELM SNICAR grain-aging lookup table."""
+    if explicit_path is not None:
+        return explicit_path.expanduser().resolve()
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = []
+    if clm_params is not None:
+        candidates.append(Path(clm_params).expanduser().resolve().parent / SNICAR_AGING_FILENAME)
+    candidates.extend(
+        (
+            project_root / "e3sm_inputdata/lnd/clm2/snicardata" / SNICAR_AGING_FILENAME,
+            project_root / "E3SM-emulator/components/elm/tools/canopyflux_emulator" / SNICAR_AGING_FILENAME,
+            project_root / "surface_emulator" / SNICAR_AGING_FILENAME,
+        )
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
 def _find_elm_history_file(path: Path, year: int) -> Path:
     """Find the ELM h0 history file for ``year`` under a case run directory."""
     path = Path(path)
@@ -1442,6 +1475,42 @@ def _read_elm_tsoi_history(path: Path, ncell: int) -> np.ndarray:
     )
 
 
+def _read_elm_soil_water_history(
+    path: Path,
+    var_name: str,
+    ncell: int,
+) -> np.ndarray:
+    """Read ELM SOILLIQ/SOILICE as (time, ncell, levgrnd)."""
+    with Dataset(path) as ds:
+        if var_name not in ds.variables:
+            raise KeyError(f"{path} does not contain {var_name}")
+        var = ds.variables[var_name]
+        data = np.ma.asarray(var[:], dtype=np.float64).filled(np.nan)
+        dims = tuple(str(d).lower() for d in getattr(var, "dimensions", ()))
+    if data.ndim != 3:
+        raise ValueError(f"Expected {var_name} to be 3-D in {path}, got shape {data.shape}")
+    if "time" in dims and "levgrnd" in dims:
+        time_axis = dims.index("time")
+        lev_axis = dims.index("levgrnd")
+        grid_axis = next(
+            (i for i, d in enumerate(dims) if d in {"lndgrid", "gridcell", "cell"}),
+            None,
+        )
+        if grid_axis is None:
+            grid_axis = next(i for i in range(3) if i not in (time_axis, lev_axis))
+        data = np.moveaxis(data, (time_axis, grid_axis, lev_axis), (0, 1, 2))
+    else:
+        data = np.moveaxis(data, (0, 2, 1), (0, 1, 2))
+    if data.shape[1] == ncell:
+        return data
+    if data.shape[1] == 1:
+        return np.broadcast_to(data, (data.shape[0], ncell, data.shape[2])).copy()
+    raise ValueError(
+        f"ELM {var_name} lndgrid dimension {data.shape[1]} does not match replay "
+        f"ncell={ncell}; only matching-grid or single-cell ELM history is supported."
+    )
+
+
 def _read_elm_scalar_history(path: Path, var_name: str, ncell: int) -> np.ndarray:
     """Read a scalar ELM h0 history variable as ``(time, cell)``."""
     var_name = str(var_name)
@@ -1474,6 +1543,47 @@ def _read_elm_scalar_history(path: Path, var_name: str, ncell: int) -> np.ndarra
     )
 
 
+def _elm_history_override_window(
+    *,
+    sample_count: int,
+    year: int,
+    month: int,
+    n1h: int,
+    calendar: str,
+) -> tuple[int, int, int]:
+    """Return records/day, lag-aligned start record, and records needed."""
+    days_in_year = sum(_days_in_month(year, value, calendar) for value in range(1, 13))
+    records_per_day_f = float(sample_count) / float(days_in_year)
+    records_per_day = int(round(records_per_day_f))
+    if records_per_day not in (1, 24) or not np.isclose(
+        records_per_day_f,
+        records_per_day,
+        rtol=0.0,
+        atol=1.0e-6,
+    ):
+        raise ValueError(
+            "ELM override history must contain either daily or hourly records; "
+            f"found {sample_count} records for {days_in_year} days"
+        )
+    day_offset = _day_of_year_start(year, month, calendar) - 1
+    # ELM history is interval-end stamped. Record 0 covers the interval ending
+    # at the run start, so replay hour/day 0 aligns with history record 1.
+    start_record = day_offset * records_per_day + 1
+    records_needed = int(math.ceil(int(n1h) * records_per_day / 24.0))
+    return records_per_day, start_record, records_needed
+
+
+def _elm_history_records_to_hourly(
+    records: np.ndarray,
+    *,
+    records_per_day: int,
+    n1h: int,
+) -> np.ndarray:
+    if records_per_day == 24:
+        return records[:int(n1h)]
+    return np.repeat(records, 24, axis=0)[:int(n1h)]
+
+
 def _load_elm_history_soil_temperature_override(
     path: Path,
     *,
@@ -1484,28 +1594,107 @@ def _load_elm_history_soil_temperature_override(
     n1h: int,
     calendar: str,
 ) -> np.ndarray:
-    """Load lag-aligned ELM daily TSOI and repeat to hourly replay steps."""
-    n_days_needed = int(math.ceil(int(n1h) / 24.0))
-    start_record = _day_of_year_start(year, month, calendar)
+    """Load lag-aligned daily or hourly ELM TSOI for replay steps."""
     current = _read_elm_tsoi_history(_find_elm_history_file(path, year), ncell)
+    records_per_day, start_record, records_needed = _elm_history_override_window(
+        sample_count=current.shape[0],
+        year=year,
+        month=month,
+        n1h=n1h,
+        calendar=calendar,
+    )
     pieces = [current]
-    if start_record + n_days_needed > current.shape[0]:
+    if start_record + records_needed > current.shape[0]:
         pieces.append(_read_elm_tsoi_history(_find_elm_history_file(path, year + 1), ncell))
-    daily = np.concatenate(pieces, axis=0)[start_record:start_record + n_days_needed, :, :]
-    if daily.shape[0] < n_days_needed:
+    records = np.concatenate(pieces, axis=0)[
+        start_record:start_record + records_needed, :, :
+    ]
+    if records.shape[0] < records_needed:
         raise ValueError(
-            f"ELM TSOI override has only {daily.shape[0]} daily records for "
-            f"{year}-{month:02d}; need {n_days_needed}"
+            f"ELM TSOI override has only {records.shape[0]} records for "
+            f"{year}-{month:02d}; need {records_needed}"
         )
-    if daily.shape[2] < 1:
+    if records.shape[2] < 1:
         raise ValueError("ELM TSOI override contains no soil levels")
-    if daily.shape[2] < nlev:
-        pad = np.broadcast_to(daily[:, :, -1:], (daily.shape[0], daily.shape[1], nlev - daily.shape[2]))
-        daily = np.concatenate([daily, pad], axis=2)
-    elif daily.shape[2] > nlev:
-        daily = daily[:, :, :nlev]
-    hourly = np.repeat(daily, 24, axis=0)[:int(n1h), :, :]
+    if records.shape[2] < nlev:
+        pad = np.broadcast_to(
+            records[:, :, -1:],
+            (records.shape[0], records.shape[1], nlev - records.shape[2]),
+        )
+        records = np.concatenate([records, pad], axis=2)
+    elif records.shape[2] > nlev:
+        records = records[:, :, :nlev]
+    hourly = _elm_history_records_to_hourly(
+        records,
+        records_per_day=records_per_day,
+        n1h=n1h,
+    )
     return np.asarray(hourly, dtype=np.float32)
+
+
+def _load_elm_history_soil_moisture_override(
+    path: Path,
+    *,
+    year: int,
+    month: int,
+    ncell: int,
+    nlev: int,
+    n1h: int,
+    calendar: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load lag-aligned daily or hourly ELM SOILLIQ/SOILICE."""
+
+    def _load_year(year_i: int) -> tuple[np.ndarray, np.ndarray]:
+        history_file = _find_elm_history_file(path, year_i)
+        return (
+            _read_elm_soil_water_history(history_file, "SOILLIQ", ncell),
+            _read_elm_soil_water_history(history_file, "SOILICE", ncell),
+        )
+
+    liquid_current, ice_current = _load_year(year)
+    records_per_day, start_record, records_needed = _elm_history_override_window(
+        sample_count=liquid_current.shape[0],
+        year=year,
+        month=month,
+        n1h=n1h,
+        calendar=calendar,
+    )
+    liquid_pieces = [liquid_current]
+    ice_pieces = [ice_current]
+    if start_record + records_needed > liquid_current.shape[0]:
+        liquid_next, ice_next = _load_year(year + 1)
+        liquid_pieces.append(liquid_next)
+        ice_pieces.append(ice_next)
+    liquid_records = np.concatenate(liquid_pieces, axis=0)[
+        start_record:start_record + records_needed, :, :
+    ]
+    ice_records = np.concatenate(ice_pieces, axis=0)[
+        start_record:start_record + records_needed, :, :
+    ]
+    if liquid_records.shape[0] < records_needed or ice_records.shape[0] < records_needed:
+        raise ValueError(
+            f"ELM soil-moisture override has only {liquid_records.shape[0]} "
+            f"records for {year}-{month:02d}; need {records_needed}"
+        )
+    if liquid_records.shape[2] < nlev or ice_records.shape[2] < nlev:
+        raise ValueError(
+            "ELM SOILLIQ/SOILICE override does not contain the requested "
+            f"{nlev} soil levels"
+        )
+    liquid_hourly = _elm_history_records_to_hourly(
+        liquid_records[:, :, :nlev],
+        records_per_day=records_per_day,
+        n1h=n1h,
+    )
+    ice_hourly = _elm_history_records_to_hourly(
+        ice_records[:, :, :nlev],
+        records_per_day=records_per_day,
+        n1h=n1h,
+    )
+    return (
+        np.asarray(liquid_hourly, dtype=np.float32),
+        np.asarray(ice_hourly, dtype=np.float32),
+    )
 
 
 def _load_elm_history_scalar_hourly_override(
@@ -1519,9 +1708,7 @@ def _load_elm_history_scalar_hourly_override(
     n1h: int,
     calendar: str,
 ) -> np.ndarray:
-    """Load a lag-aligned daily ELM scalar history field and repeat hourly."""
-    n_days_needed = int(math.ceil(int(n1h) / 24.0))
-    start_record = _day_of_year_start(year, month, calendar)
+    """Load a lag-aligned daily or hourly ELM scalar history field."""
     names = tuple(dict.fromkeys((str(var_name), *(str(name) for name in (aliases or ())))))
 
     def _read_any(path_i: Path) -> np.ndarray:
@@ -1536,18 +1723,31 @@ def _load_elm_history_scalar_hourly_override(
         ) from last_error
 
     current = _read_any(_find_elm_history_file(path, year))
+    records_per_day, start_record, records_needed = _elm_history_override_window(
+        sample_count=current.shape[0],
+        year=year,
+        month=month,
+        n1h=n1h,
+        calendar=calendar,
+    )
     pieces = [current]
-    if start_record + n_days_needed > current.shape[0]:
+    if start_record + records_needed > current.shape[0]:
         pieces.append(_read_any(_find_elm_history_file(path, year + 1)))
-    daily = np.concatenate(pieces, axis=0)[start_record:start_record + n_days_needed, :]
-    if daily.shape[0] < n_days_needed:
+    records = np.concatenate(pieces, axis=0)[
+        start_record:start_record + records_needed, :
+    ]
+    if records.shape[0] < records_needed:
         raise ValueError(
-            f"ELM {var_name} override has only {daily.shape[0]} daily records for "
-            f"{year}-{month:02d}; need {n_days_needed}"
+            f"ELM {var_name} override has only {records.shape[0]} records for "
+            f"{year}-{month:02d}; need {records_needed}"
         )
-    if not np.all(np.isfinite(daily)):
+    if not np.all(np.isfinite(records)):
         raise ValueError(f"ELM {var_name} override contains missing/non-finite values for {year}-{month:02d}")
-    hourly = np.repeat(daily, 24, axis=0)[:int(n1h), :]
+    hourly = _elm_history_records_to_hourly(
+        records,
+        records_per_day=records_per_day,
+        n1h=n1h,
+    )
     return np.asarray(hourly, dtype=np.float32)
 
 
@@ -1612,6 +1812,7 @@ def build_regional_static_vectorized(
     tausvis: float,
     tausnir: float,
     xl: float,
+    rsub_top_globalmax: float = 10.0,
     device: "torch.device",
     dtype: "torch.dtype",
     nlev_hydro: int = 10,
@@ -1680,6 +1881,7 @@ def build_regional_static_vectorized(
     hydro_np.h2osfc_thresh  = h2osfc_thresh_arr.reshape(ncell, 1)
     hydro_np.topo_slope     = slope.reshape(ncell, 1)
     hydro_np.fover          = np.full((ncell, 1), 0.5, dtype=np.float64)
+    hydro_np.rsub_top_globalmax = np.full((ncell, 1), rsub_top_globalmax, dtype=np.float64)
     # fdrain and pc remain at their scalar defaults.
 
     # --- Torch hydro params with (ncell, 1, nlev) 3-D tensors ---
@@ -1699,6 +1901,9 @@ def build_regional_static_vectorized(
         h2osfc_thresh = torch.as_tensor(h2osfc_thresh_arr.reshape(ncell, 1), device=device, dtype=dtype),
         pc       = torch.as_tensor(np.full((ncell, 1), 0.4), device=device, dtype=dtype),
         topo_slope = torch.as_tensor(slope.reshape(ncell, 1), device=device, dtype=dtype),
+        rsub_top_globalmax=torch.as_tensor(
+            hydro_np.rsub_top_globalmax, device=device, dtype=dtype
+        ),
     )
 
     # --- Per-cell soil thermal parameters (ncell, nlev_thermal) ---
@@ -1878,6 +2083,80 @@ def _parse_ood_feature_map_names(value: str | None) -> tuple[str, ...]:
     return names
 
 
+_NUMRAD_SHORTWAVE_DIAGNOSTICS = frozenset(
+    {"albgrd_mean", "albgri_mean", "albd_mean", "albi_mean"}
+)
+
+
+def _reduce_regional_shortwave_diagnostic(
+    key: str,
+    value: "torch.Tensor",
+    *,
+    pft_weights: "torch.Tensor",
+    universal_pft_weights: "torch.Tensor",
+    universal_pft_count: int,
+    device: "torch.device",
+    dtype: "torch.dtype",
+) -> "torch.Tensor":
+    """Area-blend PFT-dependent radiation fields and ensemble-average them.
+
+    ``surface_shortwave_diagnostics_torch`` intentionally returns a mixture of
+    PFT-dependent fields (for example reflected radiation) and PFT-invariant
+    forcing/ground fields.  Their respective layouts are
+    ``(npft,ncell,nens[,2])`` and ``(ncell,nens[,2])``.  Treating every field as
+    PFT-major fails whenever ``ncell != npft`` and is especially visible in
+    large regional runs.
+    """
+    value_t = (
+        value.to(device=device, dtype=dtype)
+        if isinstance(value, torch.Tensor)
+        else torch.as_tensor(value, device=device, dtype=dtype)
+    )
+    is_numrad = key in _NUMRAD_SHORTWAVE_DIAGNOSTICS
+    pft_rank = 4 if is_numrad else 3
+    cell_rank = pft_rank - 1
+    if value_t.ndim == pft_rank:
+        if value_t.shape[0] == int(universal_pft_count):
+            weights = universal_pft_weights
+        elif value_t.shape[0] == pft_weights.shape[0]:
+            weights = pft_weights
+        else:
+            raise RuntimeError(
+                f"{key} has PFT-major shape {tuple(value_t.shape)}, but its first "
+                f"dimension matches neither npft={pft_weights.shape[0]} nor "
+                f"nuniversal={int(universal_pft_count)}"
+            )
+        while weights.ndim < value_t.ndim:
+            weights = weights.unsqueeze(-1)
+        reduced = torch.sum(weights * value_t, dim=0)
+    elif value_t.ndim == cell_rank:
+        reduced = value_t
+    else:
+        expected = (
+            "(npft,ncell,nens,2) or (ncell,nens,2)"
+            if is_numrad else "(npft,ncell,nens) or (ncell,nens)"
+        )
+        raise RuntimeError(
+            f"{key} shortwave diagnostic has shape {tuple(value_t.shape)}; "
+            f"expected {expected}"
+        )
+
+    if is_numrad:
+        if reduced.ndim == 3 and reduced.shape[-1] == 2:
+            return reduced.mean(1)
+        if reduced.ndim == 2 and reduced.shape[-1] == 2:
+            return reduced
+    else:
+        if reduced.ndim == 2:
+            return reduced.mean(1)
+        if reduced.ndim == 1:
+            return reduced
+    raise RuntimeError(
+        f"{key} reduced shortwave diagnostic has unsupported shape "
+        f"{tuple(reduced.shape)}"
+    )
+
+
 @torch.inference_mode()
 def run_regional_pass(
     *,
@@ -1902,6 +2181,7 @@ def run_regional_pass(
     soil_temperature_backend: str = "torch",
     snow_model_enabled: bool = True,
     snow_scalar_only: bool = False,
+    blend_partial_snow_soil_temperature: bool = False,
     co2_ppm: float = _CO2_PPM_FALLBACK,
     initial_state=None,             # if None, cold start
     profile_sections: "dict[str, float] | None" = None,
@@ -1926,9 +2206,11 @@ def run_regional_pass(
     temperature_max_k: float = 330.0,
     photosynthesis_max: float = 100.0,
     thermal_target_z_clamp: float = 3.0,
+    soil_energy_sabg_source: str = "learned",
     physics_step_hours: float = 1.0,
     universal_mlp_batch: bool = False,
     sparse_universal_mlp_batch: bool = True,
+    sparse_individual_feature_assembly: bool = False,
     neutral_patch0_flnr: float | None = None,
     regional_lai_scale: float = 1.0,
     regional_sai_scale: float = 1.0,
@@ -1941,6 +2223,9 @@ def run_regional_pass(
     regional_trait_relative_sd: float = 0.20,
     regional_trait_feature_names: tuple[str, ...] | list[str] | None = None,
     soil_temperature_override: np.ndarray | None = None,
+    ground_temperature_override: np.ndarray | None = None,
+    soil_liquid_override: np.ndarray | None = None,
+    soil_ice_override: np.ndarray | None = None,
     ground_heat_flux_override: np.ndarray | None = None,
     ground_heat_flux_override_targets: tuple[str, ...] | list[str] | None = None,
     zwt_override: np.ndarray | None = None,
@@ -1956,6 +2241,11 @@ def run_regional_pass(
     Returns ``(final_state, sanity, timing_info)`` where ``timing_info`` is a
     dict with keys ``"n3h"``, ``"n1h"``, ``"elapsed_s"``.
     """
+    if soil_energy_sabg_source not in {"learned", "diagnostic"}:
+        raise ValueError(
+            "soil_energy_sabg_source must be 'learned' or 'diagnostic', got "
+            f"{soil_energy_sabg_source!r}"
+        )
     from .coupled_surface_hydrology_soiltemp import (
         apply_canopy_interception, apply_canopy_evaporation,
         predict_surface_targets, AtmosphericForcingInputs,
@@ -2153,6 +2443,75 @@ def run_regional_pass(
             device=device,
             dtype=dtype,
         )
+    ground_temperature_override_t = None
+    if ground_temperature_override is not None:
+        override_np = np.asarray(ground_temperature_override, dtype=np.float32)
+        if override_np.ndim == 1:
+            override_np = override_np[:, None]
+        if override_np.ndim != 2:
+            raise ValueError(
+                "ground_temperature_override must have shape (hour, cell) or "
+                f"(hour,), got {override_np.shape}"
+            )
+        if override_np.shape[0] < n1h:
+            raise ValueError(
+                f"ground_temperature_override has {override_np.shape[0]} hours "
+                f"but replay needs {n1h}"
+            )
+        if override_np.shape[1] not in (1, ncell):
+            raise ValueError(
+                "ground_temperature_override cell dimension "
+                f"{override_np.shape[1]} does not match ncell={ncell}"
+            )
+        if override_np.shape[1] == 1 and ncell > 1:
+            override_np = np.broadcast_to(
+                override_np,
+                (override_np.shape[0], ncell),
+            ).copy()
+        if not np.all(np.isfinite(override_np[:n1h])):
+            raise ValueError("ground_temperature_override must contain finite temperatures")
+        ground_temperature_override_t = torch.as_tensor(
+            override_np[:n1h],
+            device=device,
+            dtype=dtype,
+        )
+    soil_liquid_override_t = None
+    soil_ice_override_t = None
+    if (soil_liquid_override is None) != (soil_ice_override is None):
+        raise ValueError("soil_liquid_override and soil_ice_override must be provided together")
+    if soil_liquid_override is not None and soil_ice_override is not None:
+        water_overrides = []
+        for name, override in (
+            ("soil_liquid_override", soil_liquid_override),
+            ("soil_ice_override", soil_ice_override),
+        ):
+            override_np = np.asarray(override, dtype=np.float32)
+            if override_np.ndim == 2:
+                override_np = override_np[:, None, :]
+            if override_np.ndim != 3:
+                raise ValueError(
+                    f"{name} must have shape (hour, cell, lev) or (hour, lev); "
+                    f"got {override_np.shape}"
+                )
+            if override_np.shape[0] < n1h:
+                raise ValueError(
+                    f"{name} has {override_np.shape[0]} hours but replay needs {n1h}"
+                )
+            if override_np.shape[1] not in (1, ncell):
+                raise ValueError(
+                    f"{name} cell dimension {override_np.shape[1]} does not match ncell={ncell}"
+                )
+            if override_np.shape[1] == 1 and ncell > 1:
+                override_np = np.broadcast_to(
+                    override_np,
+                    (override_np.shape[0], ncell, override_np.shape[2]),
+                ).copy()
+            if not np.all(np.isfinite(override_np[:n1h])) or np.any(override_np[:n1h] < 0.0):
+                raise ValueError(f"{name} must contain finite non-negative water masses")
+            water_overrides.append(
+                torch.as_tensor(override_np[:n1h], device=device, dtype=dtype)
+            )
+        soil_liquid_override_t, soil_ice_override_t = water_overrides
     ground_heat_flux_override_t = None
     ground_heat_flux_override_targets = tuple(
         str(name) for name in (ground_heat_flux_override_targets or ("hs_soil", "hs_top_snow"))
@@ -2313,7 +2672,7 @@ def run_regional_pass(
     universal_sparse_weight_pft_idx_t: "torch.Tensor | None" = None
     universal_sparse_cell_idx_t: "torch.Tensor | None" = None
     sparse_cells_by_pft: dict[int, "torch.Tensor"] = {}
-    if sparse_universal_mlp_batch:
+    if sparse_universal_mlp_batch or sparse_individual_feature_assembly:
         pft_weight_np_all = np.asarray(pft_weights, dtype=np.float64)
         for p_idx in range(npft):
             cells_np = np.nonzero(pft_weight_np_all[p_idx, :] > 1.0e-12)[0]
@@ -2452,6 +2811,8 @@ def run_regional_pass(
     feat_bufs = []
     feat_idx_maps = []
     universal_feature_batch = None
+    universal_sparse_feature_batch = None
+    individual_sparse_feature_bufs: dict[int, "torch.Tensor"] = {}
     from .coupled_surface_hydrology_soiltemp import _bundle_input_index_map
     if universal_mlp_batch:
         p_bundle = universal_ref_bundle
@@ -2644,7 +3005,61 @@ def run_regional_pass(
             int_snow=state_in.int_snow,
         )
 
+    def _apply_soil_moisture_override(state_in: "_CCS", step_i: int) -> "_CCS":
+        if soil_liquid_override_t is None or soil_ice_override_t is None:
+            return state_in
+        source_liquid = soil_liquid_override_t[
+            min(int(step_i), soil_liquid_override_t.shape[0] - 1)
+        ]
+        source_ice = soil_ice_override_t[
+            min(int(step_i), soil_ice_override_t.shape[0] - 1)
+        ]
+        current_liquid = (
+            state_in.h2osoi_liq.to(device=device, dtype=dtype)
+            if isinstance(state_in.h2osoi_liq, torch.Tensor)
+            else torch.as_tensor(state_in.h2osoi_liq, device=device, dtype=dtype)
+        )
+        current_ice = (
+            state_in.h2osoi_ice.to(device=device, dtype=dtype)
+            if isinstance(state_in.h2osoi_ice, torch.Tensor)
+            else torch.as_tensor(state_in.h2osoi_ice, device=device, dtype=dtype)
+        )
+        nlev_override = min(
+            int(source_liquid.shape[-1]),
+            int(source_ice.shape[-1]),
+            int(current_liquid.shape[-1]),
+            int(current_ice.shape[-1]),
+        )
+        h2osoi_liq = current_liquid.clone()
+        h2osoi_ice = current_ice.clone()
+        h2osoi_liq[..., :nlev_override] = source_liquid[
+            :, None, :nlev_override
+        ].expand(-1, h2osoi_liq.shape[1], -1)
+        h2osoi_ice[..., :nlev_override] = source_ice[
+            :, None, :nlev_override
+        ].expand(-1, h2osoi_ice.shape[1], -1)
+        return _CCS(
+            h2osoi_liq=h2osoi_liq,
+            h2osoi_ice=h2osoi_ice,
+            h2ocan=state_in.h2ocan,
+            h2osfc=state_in.h2osfc,
+            frac_h2osfc=state_in.frac_h2osfc,
+            frac_sno=state_in.frac_sno,
+            zwt=state_in.zwt,
+            t_soisno=state_in.t_soisno,
+            wa=state_in.wa,
+            t_h2osfc=state_in.t_h2osfc,
+            t10=state_in.t10,
+            t10_history=state_in.t10_history,
+            h2osno=state_in.h2osno,
+            snow_depth=state_in.snow_depth,
+            snow_t=state_in.snow_t,
+            snow_layers=state_in.snow_layers,
+            int_snow=state_in.int_snow,
+        )
+
     state = _apply_soil_temperature_override(state, 0)
+    state = _apply_soil_moisture_override(state, 0)
 
     def _apply_zwt_override(state_in: "_CCS", step_i: int) -> "_CCS":
         if zwt_override_t is None:
@@ -2743,6 +3158,45 @@ def run_regional_pass(
                     _static_feature_value(getattr(p_static, col, 0.0)),
                     _feature_batch_shape,
                 )
+
+    # Keep the model-facing universal features in active-pair order.  The
+    # legacy dense allocation remains as a compatibility/reference row for
+    # canopy and coupled-physics code, but hourly assembly no longer writes a
+    # full PFT-by-cell grid only to gather it again before inference.
+    if (
+        universal_feature_batch is not None
+        and universal_sparse_mlp_enabled
+        and universal_sparse_pft_idx_t is not None
+        and universal_sparse_cell_idx_t is not None
+    ):
+        universal_sparse_feature_batch = universal_feature_batch[
+            universal_sparse_pft_idx_t,
+            universal_sparse_cell_idx_t,
+            ...,
+        ].clone()
+
+    # Snow-disabled regional benchmarks do not need a full-cell individual
+    # feature row in coupled_step (surface targets are already precomputed).
+    # Keep patch-specific models packed over their nonzero-weight cells so
+    # feature derivation and MLP inference avoid inactive grid cells.  Snow
+    # replays retain the dense path because update_snow_state consumes the
+    # complete reference feature row.
+    if sparse_individual_feature_assembly and not snow_model_enabled:
+        for p_idx, feat in enumerate(feat_bufs):
+            if p_idx in universal_batch_index_set:
+                continue
+            cells = sparse_cells_by_pft.get(p_idx)
+            if cells is not None and 0 < cells.numel() < ncell:
+                individual_sparse_feature_bufs[p_idx] = feat.index_select(0, cells).clone()
+        if individual_sparse_feature_bufs:
+            packed_summary = ", ".join(
+                f"PFT {int(pft_ids[p_idx])}: {int(sparse_cells_by_pft[p_idx].numel()):,}/{ncell:,}"
+                for p_idx in sorted(individual_sparse_feature_bufs)
+            )
+            print(
+                f"    individual sparse feature assembly enabled ({packed_summary} active cells)",
+                flush=True,
+            )
 
     # Fast universal feature assembly support.  This avoids calling the generic
     # feature builder once per PFT when every PFT uses the same input schema.
@@ -2884,6 +3338,7 @@ def run_regional_pass(
         "forc_q",
         "forc_pbot",
         "forc_vpd",
+        "qg_soil_diag",
         "forc_lwrad",
         "forc_rain",
         "forc_snow",
@@ -2913,6 +3368,10 @@ def run_regional_pass(
         "t_grnd",
         "t_h2osfc",
         "ugust",
+        "h2osfc",
+        "h2osno",
+        "snow_layer_count",
+        "t_snow_top",
     )
     universal_dynamic_feature_active = tuple(
         (int(idx), pos)
@@ -2920,8 +3379,6 @@ def run_regional_pass(
         for idx in ((universal_idx_map.get(name) if universal_idx_map is not None and name not in _ABLATED_NAMES else None),)
         if idx is not None
     )
-    universal_dynamic_feature_copy_indices = tuple(idx for idx, _ in universal_dynamic_feature_active)
-    universal_feature_update_buffer: "torch.Tensor | None" = None
     universal_rootfr_btran = None
     universal_smpso = None
     universal_smpsc = None
@@ -3075,36 +3532,105 @@ def run_regional_pass(
             return value_t
         return torch.broadcast_to(value_t, (nuniversal, ncell, nens))
 
-    def _update_universal_dynamic_feature_columns(values: tuple["torch.Tensor | float | int", ...]) -> None:
-        nonlocal universal_feature_update_buffer
+    def _use_sparse_universal_feature_assembly() -> bool:
+        return bool(
+            universal_sparse_mlp_enabled
+            and universal_sparse_pft_idx_t is not None
+            and universal_sparse_cell_idx_t is not None
+            and 0 < universal_sparse_pft_idx_t.numel() < len(universal_batch_indices) * ncell
+        )
+
+    def _gather_sparse_universal_value(value: "torch.Tensor | float | int") -> "torch.Tensor":
+        """Gather a scalar, cell, PFT, or PFT-cell value onto active pairs."""
+        assert universal_sparse_pft_idx_t is not None
+        assert universal_sparse_cell_idx_t is not None
+        nuniversal = len(universal_batch_indices)
+        npair = int(universal_sparse_pft_idx_t.numel())
+        value_t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value, device=device, dtype=dtype)
+        value_t = value_t.to(device=device, dtype=dtype)
+        if value_t.ndim == 0:
+            return value_t.reshape(1, 1).expand(npair, nens)
+        if value_t.ndim >= 2 and value_t.shape[0] == nuniversal and value_t.shape[1] == ncell:
+            gathered = value_t[universal_sparse_pft_idx_t, universal_sparse_cell_idx_t, ...]
+        elif value_t.shape[0] == ncell:
+            gathered = value_t.index_select(0, universal_sparse_cell_idx_t)
+        elif value_t.shape[0] == nuniversal:
+            gathered = value_t.index_select(0, universal_sparse_pft_idx_t)
+        elif value_t.shape[0] == 1:
+            gathered = value_t.expand((npair,) + tuple(value_t.shape[1:]))
+        else:
+            gathered = torch.broadcast_to(value_t, (npair, nens))
+        gathered = gathered.reshape(npair, -1)
+        if gathered.shape[1] == 1:
+            return gathered.expand(npair, nens)
+        if gathered.shape[1] != nens:
+            raise ValueError(
+                f"cannot gather universal feature shape {tuple(value_t.shape)} "
+                f"onto ({npair}, {nens}) sparse PFT-cell pairs"
+            )
+        return gathered
+
+    def _sync_packed_universal_columns_to_dense(names: tuple[str, ...]) -> None:
+        """Sync the small physical-feature subset still used by dense consumers."""
+        if (
+            universal_sparse_feature_batch is None
+            or universal_feature_batch is None
+            or universal_idx_map is None
+            or universal_sparse_pft_idx_t is None
+            or universal_sparse_cell_idx_t is None
+        ):
+            return
+        for name in names:
+            idx = universal_idx_map.get(name)
+            if idx is None:
+                continue
+            universal_feature_batch[
+                universal_sparse_pft_idx_t,
+                universal_sparse_cell_idx_t,
+                :,
+                idx,
+            ] = universal_sparse_feature_batch[..., idx]
+
+    def _universal_model_feature_batch() -> "torch.Tensor | None":
+        return (
+            universal_sparse_feature_batch
+            if _use_sparse_universal_feature_assembly()
+            else universal_feature_batch
+        )
+
+    _universal_state_cached_dynamic_positions = frozenset({
+        20, 21, 22, 24, 29, 31, 32, 34, 35, 36, 37,
+    })
+    _universal_daily_vegetation_positions = frozenset({16, 17, 18, 19})
+
+    def _update_universal_dynamic_feature_columns(
+        values: tuple["torch.Tensor | float | int", ...],
+        *,
+        update_state_features: bool,
+        update_vegetation_features: bool,
+    ) -> None:
         if universal_feature_batch is None or universal_idx_map is None:
             return
         if not universal_dynamic_feature_active:
             return
-        if universal_feature_batch.device.type == "cpu":
-            for idx, pos in universal_dynamic_feature_active:
-                universal_feature_batch[..., idx] = _broadcast_universal_feature_value(values[pos])
-            return
-        ncols = len(universal_dynamic_feature_active)
-        nuniversal = len(universal_batch_indices)
-        if (
-            universal_feature_update_buffer is None
-            or universal_feature_update_buffer.shape != (nuniversal, ncell, nens, ncols)
-            or universal_feature_update_buffer.device != universal_feature_batch.device
-            or universal_feature_update_buffer.dtype != universal_feature_batch.dtype
-        ):
-            universal_feature_update_buffer = torch.empty(
-                (nuniversal, ncell, nens, ncols),
-                device=universal_feature_batch.device,
-                dtype=universal_feature_batch.dtype,
-            )
-        for out_pos, (_idx, value_pos) in enumerate(universal_dynamic_feature_active):
-            universal_feature_update_buffer[..., out_pos] = _broadcast_universal_feature_value(values[value_pos])
-        _index_copy_feature_columns_torch(
-            universal_feature_batch,
-            universal_dynamic_feature_copy_indices,
-            universal_feature_update_buffer,
-        )
+        sparse = _use_sparse_universal_feature_assembly()
+        for idx, pos in universal_dynamic_feature_active:
+            if pos in _universal_state_cached_dynamic_positions and not update_state_features:
+                continue
+            if pos in _universal_daily_vegetation_positions and not update_vegetation_features:
+                continue
+            value = values[pos]
+            if sparse:
+                assert universal_sparse_pft_idx_t is not None
+                assert universal_sparse_cell_idx_t is not None
+                assert universal_sparse_feature_batch is not None
+                # Canopy interception uses row 0 as the source of column-wide
+                # meteorology.  Keep that row current, then update only the
+                # nonzero pairs consumed by the universal MLP.
+                universal_feature_batch[0, ..., idx] = _broadcast_universal_feature_value(value)[0]
+                universal_sparse_feature_batch[..., idx] = _gather_sparse_universal_value(value)
+            else:
+                universal_feature_batch[..., idx] = _broadcast_universal_feature_value(value)
 
     def _active_snow_feature_tensors(state_check: CoupledColumnState) -> tuple[torch.Tensor, torch.Tensor]:
         if not snow_model_enabled or getattr(state_check, "frac_sno", None) is None:
@@ -3121,6 +3647,36 @@ def run_regional_pass(
             _total_snow_fraction_torch(state_check, device=device, dtype=dtype),
             _total_snow_depth_torch(state_check, device=device, dtype=dtype),
         )
+
+    def _snow_energy_feature_tensors(
+        state_check: CoupledColumnState,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        def _state_tensor(value) -> "torch.Tensor":
+            if isinstance(value, torch.Tensor):
+                return value.to(device=device, dtype=dtype)
+            return torch.as_tensor(value, device=device, dtype=dtype)
+
+        soil_top = _state_tensor(state_check.t_soisno[..., 0])
+        if not snow_model_enabled:
+            zeros = torch.zeros_like(soil_top)
+            return zeros, zeros, soil_top
+        h2osno = (
+            _state_tensor(state_check.h2osno)
+            if state_check.h2osno is not None
+            else torch.zeros_like(soil_top)
+        )
+        if state_check.snow_layers is not None:
+            snl = torch.as_tensor(state_check.snow_layers.snl, device=device, dtype=torch.int32)
+            layer_count = torch.clamp(-snl, min=0).to(dtype=dtype)
+            snow_top = _state_tensor(state_check.snow_layers.t_snow[..., 0])
+        elif state_check.snow_t is not None:
+            snow_top = _state_tensor(state_check.snow_t[..., 0])
+            layer_count = (h2osno > 0.0).to(dtype=dtype)
+        else:
+            snow_top = soil_top
+            layer_count = torch.zeros_like(soil_top)
+        snow_top = torch.where(layer_count > 0.0, snow_top, soil_top)
+        return h2osno, layer_count, snow_top
 
     def _soilbeta_from_common_features(
         common: dict,
@@ -3161,12 +3717,30 @@ def run_regional_pass(
         fidx, lidx = universal_profile_indices.get(prefix, ([], []))
         if not fidx:
             return
+        if _use_sparse_universal_feature_assembly():
+            assert universal_sparse_pft_idx_t is not None
+            assert universal_sparse_cell_idx_t is not None
+            assert universal_sparse_feature_batch is not None
+            pair_values = values.index_select(0, universal_sparse_cell_idx_t)
+            for feature_idx, layer_idx in zip(fidx, lidx):
+                universal_sparse_feature_batch[..., feature_idx] = pair_values[..., layer_idx]
+                # Row 0 is the physical reference passed to coupled_step.
+                universal_feature_batch[0, ..., feature_idx] = values[..., layer_idx]
+            return
         selected = values[..., lidx].unsqueeze(0).expand(len(universal_batch_indices), *values.shape[:-1], len(lidx))
         _index_copy_feature_columns_torch(universal_feature_batch, fidx, selected)
 
-    def _copy_pft_profile(p_idx: int, features: "torch.Tensor", prefix: str, values: "torch.Tensor") -> None:
+    def _copy_pft_profile(
+        p_idx: int,
+        features: "torch.Tensor",
+        prefix: str,
+        values: "torch.Tensor",
+        cell_idx: "torch.Tensor | None" = None,
+    ) -> None:
         fidx, lidx = pft_profile_indices[p_idx].get(prefix, ([], []))
         if fidx:
+            if cell_idx is not None:
+                values = values.index_select(0, cell_idx)
             _index_copy_feature_columns_torch(features, fidx, values[..., lidx])
 
     def _assemble_individual_features_fast(
@@ -3199,6 +3773,9 @@ def run_regional_pass(
         frac_veg: "torch.Tensor",
         htop_pft: "torch.Tensor",
         atmosphere: AtmosphericForcingInputs,
+        update_state_features: bool = True,
+        update_vegetation_features: bool = True,
+        cell_idx: "torch.Tensor | None" = None,
     ) -> "torch.Tensor":
         idx_map = feat_idx_maps[p_idx]
         assert isinstance(common["h2ocan_t"], torch.Tensor)
@@ -3212,6 +3789,14 @@ def run_regional_pass(
         assert isinstance(common["eff_porosity"], torch.Tensor)
         assert isinstance(common["smp_l"], torch.Tensor)
 
+        def _select_cells(value):
+            if cell_idx is None or value is None:
+                return value
+            value_t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value, device=device)
+            if value_t.ndim >= 1 and value_t.shape[0] == ncell:
+                return value_t.index_select(0, cell_idx)
+            return value_t
+
         if snow_model_enabled:
             feature_forc_rain = forc_rain
             feature_forc_snow = forc_snow
@@ -3223,12 +3808,16 @@ def run_regional_pass(
             feature_frac_sno = _zeros_ncell1
             feature_snow_depth = _zeros_ncell1
             sabg_state = _zero_snow_state(state)
+        feature_h2osno, feature_snow_layer_count, feature_t_snow_top = (
+            _snow_energy_feature_tensors(state)
+        )
 
         updates: dict[str, torch.Tensor | float] = {
             "forc_t": tbot,
             "forc_q": qbot,
             "forc_pbot": psrf,
             "forc_vpd": forc_vpd,
+            "qg_soil_diag": common["qg_soil_diag"],
             "forc_lwrad": flds,
             "forc_rain": feature_forc_rain,
             "forc_snow": feature_forc_snow,
@@ -3255,14 +3844,32 @@ def run_regional_pass(
             "coszen_col": coszen,
             "t_grnd": common["t_grnd"],
             "t_h2osfc": common["t_h2osfc_t"],
+            "h2osfc": common["h2osfc_t"],
+            "h2osno": feature_h2osno,
+            "snow_layer_count": feature_snow_layer_count,
+            "t_snow_top": feature_t_snow_top,
         }
+        if cell_idx is not None:
+            updates = {name: _select_cells(value) for name, value in updates.items()}
         updates = {name: value for name, value in updates.items() if name not in _ABLATED_NAMES}
+        if not update_state_features:
+            cached_state_names = {
+                "frac_sno", "snow_depth", "zwt_col", "t10", "frac_h2osfc",
+                "t_grnd", "t_h2osfc", "h2osfc", "h2osno",
+                "snow_layer_count", "t_snow_top",
+            }
+            updates = {name: value for name, value in updates.items() if name not in cached_state_names}
+        if not update_vegetation_features:
+            cached_vegetation_names = {
+                "frac_veg_nosno_patch", "elai_patch", "esai_patch", "htop_patch",
+            }
+            updates = {name: value for name, value in updates.items() if name not in cached_vegetation_names}
 
-        if "btran" in idx_map:
+        if update_state_features and "btran" in idx_map:
             if p_static.smpso is None or p_static.smpsc is None:
-                updates["btran"] = torch.ones_like(common["h2osfc_t"])
+                updates["btran"] = _select_cells(torch.ones_like(common["h2osfc_t"]))
             else:
-                updates["btran"] = coupled_btran_from_state_torch(
+                btran_value = coupled_btran_from_state_torch(
                     state,
                     p_static,
                     device=device,
@@ -3272,8 +3879,9 @@ def run_regional_pass(
                     eff_porosity=common["eff_porosity"],
                     smp_l=common["smp_l"],
                 )
-        if "soilbeta_col" in idx_map:
-            updates["soilbeta_col"] = coupled_soilbeta_from_state_torch(
+                updates["btran"] = _select_cells(btran_value)
+        if update_state_features and "soilbeta_col" in idx_map:
+            soilbeta_value = coupled_soilbeta_from_state_torch(
                 state,
                 p_static,
                 device=device,
@@ -3283,60 +3891,73 @@ def run_regional_pass(
                 frac_sno=feature_frac_sno,
                 frac_h2osfc=common["frac_h2osfc_t"],
             )
+            updates["soilbeta_col"] = _select_cells(soilbeta_value)
         if "sabg_snow" in idx_map:
+            sabg_fsds = _select_cells(fsds)
+            sabg_lai = _select_cells(lai_pft)
+            sabg_sai = _select_cells(sai_pft)
+            sabg_atmosphere = atmosphere
+            sabg_state_selected = sabg_state
+            if cell_idx is not None:
+                sabg_atmosphere = AtmosphericForcingInputs(**{
+                    name: _select_cells(getattr(atmosphere, name))
+                    for name in atmosphere.__dataclass_fields__
+                })
+                sabg_state_selected = _select_state_cells_for_sparse_pairs(sabg_state, cell_idx)
             updates["sabg_snow"] = (
                 _absorbed_ground_shortwave_torch(
-                    fsds,
+                    sabg_fsds,
                     device=device,
                     dtype=dtype,
-                    elai=lai_pft,
-                    esai=sai_pft,
-                    atmosphere=atmosphere,
-                    soil_color=p_static.soil_color,
-                    h2osoi_vol_top=common["h2osoi_vol"][..., 0],
-                    rholvis=p_static.rholvis,
-                    rholnir=p_static.rholnir,
-                    taulvis=p_static.taulvis,
-                    taulnir=p_static.taulnir,
-                    rhosvis=p_static.rhosvis,
-                    rhosnir=p_static.rhosnir,
-                    tausvis=p_static.tausvis,
-                    tausnir=p_static.tausnir,
-                    xl=p_static.xl,
+                    elai=sabg_lai,
+                    esai=sabg_sai,
+                    atmosphere=sabg_atmosphere,
+                    soil_color=_select_cells(p_static.soil_color),
+                    h2osoi_vol_top=_select_cells(common["h2osoi_vol"])[..., 0],
+                    rholvis=_select_cells(p_static.rholvis),
+                    rholnir=_select_cells(p_static.rholnir),
+                    taulvis=_select_cells(p_static.taulvis),
+                    taulnir=_select_cells(p_static.taulnir),
+                    rhosvis=_select_cells(p_static.rhosvis),
+                    rhosnir=_select_cells(p_static.rhosnir),
+                    tausvis=_select_cells(p_static.tausvis),
+                    tausnir=_select_cells(p_static.tausnir),
+                    xl=_select_cells(p_static.xl),
                     require_native_like=True,
                     context="regional sabg_snow feature",
                 )
                 if not snow_model_enabled
                 else sabg_snow_from_state_torch(
-                    sabg_state,
-                    fsds,
-                    feature_frac_sno,
+                    sabg_state_selected,
+                    sabg_fsds,
+                    _select_cells(feature_frac_sno),
                     device=device,
                     dtype=dtype,
-                    elai=lai_pft,
-                    esai=sai_pft,
-                    atmosphere=atmosphere,
-                    soil_color=p_static.soil_color,
-                    h2osoi_vol_top=common["h2osoi_vol"][..., 0],
-                    rholvis=p_static.rholvis,
-                    rholnir=p_static.rholnir,
-                    taulvis=p_static.taulvis,
-                    taulnir=p_static.taulnir,
-                    rhosvis=p_static.rhosvis,
-                    rhosnir=p_static.rhosnir,
-                    tausvis=p_static.tausvis,
-                    tausnir=p_static.tausnir,
-                    xl=p_static.xl,
+                    elai=sabg_lai,
+                    esai=sabg_sai,
+                    atmosphere=sabg_atmosphere,
+                    soil_color=_select_cells(p_static.soil_color),
+                    h2osoi_vol_top=_select_cells(common["h2osoi_vol"])[..., 0],
+                    rholvis=_select_cells(p_static.rholvis),
+                    rholnir=_select_cells(p_static.rholnir),
+                    taulvis=_select_cells(p_static.taulvis),
+                    taulnir=_select_cells(p_static.taulnir),
+                    rhosvis=_select_cells(p_static.rhosvis),
+                    rhosnir=_select_cells(p_static.rhosnir),
+                    tausvis=_select_cells(p_static.tausvis),
+                    tausnir=_select_cells(p_static.tausnir),
+                    xl=_select_cells(p_static.xl),
                     require_native_like=True,
                     context="regional sabg_snow feature",
                 )
             )
 
         _batch_update_feature_columns_torch(features, idx_map, updates)
-        _copy_pft_profile(p_idx, features, "smp_l", common["smp_l"])
-        _copy_pft_profile(p_idx, features, "eff_porosity", common["eff_porosity"])
-        _copy_pft_profile(p_idx, features, "h2osoi_liqvol", common["liqvol"])
-        _copy_pft_profile(p_idx, features, "t_soisno", common["t_soisno_t"])
+        if update_state_features:
+            _copy_pft_profile(p_idx, features, "smp_l", common["smp_l"], cell_idx)
+            _copy_pft_profile(p_idx, features, "eff_porosity", common["eff_porosity"], cell_idx)
+            _copy_pft_profile(p_idx, features, "h2osoi_liqvol", common["liqvol"], cell_idx)
+            _copy_pft_profile(p_idx, features, "t_soisno", common["t_soisno_t"], cell_idx)
         return features
 
     def _universal_btran_and_root_fraction_from_common(common: dict) -> tuple["torch.Tensor | None", "torch.Tensor | None"]:
@@ -3360,14 +3981,42 @@ def run_regional_pass(
         assert isinstance(t_soisno_t, torch.Tensor)
         assert isinstance(h2osfc_t, torch.Tensor)
 
-        liqvol4 = liqvol.unsqueeze(0)
-        temp4 = t_soisno_t.unsqueeze(0)
-        active = (liqvol4 > 0.0) & (temp4 > (TFRZ + universal_tc_stress_c))
-        smp_node = torch.maximum(universal_smpsc, smp_l.unsqueeze(0))
-        denom = torch.clamp(universal_smpso - universal_smpsc, min=1.0e-12)
-        ep_over_ws = eff_porosity.unsqueeze(0) / torch.clamp(universal_watsat.unsqueeze(0), min=1.0e-12)
+        sparse = _use_sparse_universal_feature_assembly()
+        if sparse:
+            assert universal_sparse_pft_idx_t is not None
+            assert universal_sparse_cell_idx_t is not None
+            pidx = universal_sparse_pft_idx_t
+            cidx = universal_sparse_cell_idx_t
+            liqvol4 = liqvol.index_select(0, cidx)
+            temp4 = t_soisno_t.index_select(0, cidx)
+            smp_l4 = smp_l.index_select(0, cidx)
+            eff_porosity4 = eff_porosity.index_select(0, cidx)
+            smpso4 = universal_smpso[pidx, 0, ...]
+            smpsc4 = universal_smpsc[pidx, 0, ...]
+            tc_stress4 = universal_tc_stress_c[pidx, 0, ...]
+            rootfr4 = universal_rootfr_btran[pidx, 0, ...]
+            valid4 = universal_btran_valid[pidx, 0, ...]
+            if universal_watsat.shape[0] == ncell:
+                watsat4 = universal_watsat.index_select(0, cidx)
+            else:
+                watsat4 = universal_watsat.expand(ncell, *universal_watsat.shape[1:]).index_select(0, cidx)
+        else:
+            liqvol4 = liqvol.unsqueeze(0)
+            temp4 = t_soisno_t.unsqueeze(0)
+            smp_l4 = smp_l.unsqueeze(0)
+            eff_porosity4 = eff_porosity.unsqueeze(0)
+            smpso4 = universal_smpso
+            smpsc4 = universal_smpsc
+            tc_stress4 = universal_tc_stress_c
+            rootfr4 = universal_rootfr_btran
+            valid4 = universal_btran_valid
+            watsat4 = universal_watsat.unsqueeze(0)
+        active = (liqvol4 > 0.0) & (temp4 > (TFRZ + tc_stress4))
+        smp_node = torch.maximum(smpsc4, smp_l4)
+        denom = torch.clamp(smpso4 - smpsc4, min=1.0e-12)
+        ep_over_ws = eff_porosity4 / torch.clamp(watsat4, min=1.0e-12)
         rresis = torch.minimum(
-            ep_over_ws * (smp_node - universal_smpsc) / denom,
+            ep_over_ws * (smp_node - smpsc4) / denom,
             torch.ones_like(smp_node),
         )
         floodf = torch.where(
@@ -3375,11 +4024,12 @@ def run_regional_pass(
             torch.clamp(1.0 - 0.001 * torch.clamp(h2osfc_t, min=0.0), min=0.0),
             torch.zeros_like(h2osfc_t),
         )
-        rresis = torch.where(active, rresis * floodf.unsqueeze(0).unsqueeze(-1), torch.zeros_like(rresis))
+        flood_scale = floodf.index_select(0, cidx).unsqueeze(-1) if sparse else floodf.unsqueeze(0).unsqueeze(-1)
+        rresis = torch.where(active, rresis * flood_scale, torch.zeros_like(rresis))
         rootfr_unf = torch.where(
-            temp4 > (TFRZ + universal_tc_stress_c),
-            universal_rootfr_btran,
-            torch.zeros_like(universal_rootfr_btran),
+            temp4 > (TFRZ + tc_stress4),
+            rootfr4,
+            torch.zeros_like(rootfr4),
         )
         root_sum = rootfr_unf.sum(dim=-1, keepdim=True)
         rootfr_unf = torch.where(root_sum > 1.0e-12, rootfr_unf / root_sum, torch.zeros_like(rootfr_unf))
@@ -3391,11 +4041,20 @@ def run_regional_pass(
             torch.zeros_like(root_contrib),
         )
         rootr = torch.where(
-            universal_btran_valid.unsqueeze(-1),
+            valid4.unsqueeze(-1),
             rootr,
-            universal_rootfr_btran.expand_as(rootr),
+            rootfr4.expand_as(rootr),
         )
-        btran = torch.where(universal_btran_valid, btran, torch.ones_like(btran))
+        btran = torch.where(valid4, btran, torch.ones_like(btran))
+        if sparse:
+            if rootr.shape[:2] != (pidx.numel(), nens):
+                raise RuntimeError(
+                    "unexpected sparse btran shape: "
+                    f"rootr={tuple(rootr.shape)} liq={tuple(liqvol4.shape)} "
+                    f"smpso={tuple(smpso4.shape)} smpsc={tuple(smpsc4.shape)} "
+                    f"tc={tuple(tc_stress4.shape)} rootfr={tuple(rootfr4.shape)} "
+                    f"valid={tuple(valid4.shape)} watsat={tuple(watsat4.shape)}"
+                )
         return btran, rootr
 
     ood_diagnostics_stride = int(ood_diagnostics_stride)
@@ -3471,6 +4130,8 @@ def run_regional_pass(
     _state_has_snow = _snow_present_cells > 0
     _snow_pending_in_accum = False
     _universal_fast_steps = 0
+    _state_feature_refreshes = 0
+    _vegetation_feature_refreshes = 0
     # Accumulators for diagnostic maps (time-mean, kept on device).
     _acc_forc_t: "torch.Tensor | None" = None
     _acc_forc_q: "torch.Tensor | None" = None
@@ -3520,6 +4181,8 @@ def run_regional_pass(
     _acc_active_snow_depth: "torch.Tensor | None" = None
     _acc_snow_depth_eff: "torch.Tensor | None" = None
     _acc_shortwave_diag: "dict[str, torch.Tensor]" = {}
+    _acc_energy_diag: "dict[str, torch.Tensor]" = {}
+    _closure_residual_cumulative = torch.zeros((ncell,), device=device, dtype=dtype)
     _acc_ood_max_z: "torch.Tensor | None" = None
     _acc_ood_frac:  "torch.Tensor | None" = None
     _acc_ood_feature_z: "dict[str, torch.Tensor]" = {}
@@ -3548,6 +4211,8 @@ def run_regional_pass(
     _period_trait_std_count = 0
     _daily_shortwave_rows: "dict[str, list[np.ndarray]]" = {}
     _daily_shortwave_sum: "dict[str, torch.Tensor]" = {}
+    _daily_energy_rows: "dict[str, list[np.ndarray]]" = {}
+    _daily_energy_sum: "dict[str, torch.Tensor]" = {}
     _daily_elm_h0_tsoi_rows: list[np.ndarray] = []
     _daily_elm_h0_h2osoi_rows: list[np.ndarray] = []
     _daily_elm_h0_tsoi_sum: "torch.Tensor | None" = None
@@ -3630,6 +4295,15 @@ def run_regional_pass(
         "hs_top_snow",
         "hs_h2osfc",
         "dhsdT",
+        "eflx_sh_soil",
+        "sabg_soil",
+        "sabg_soil_learned",
+        "sabg_soil_diagnostic",
+        "sabg_soil_learned_minus_diagnostic",
+        "dlrad",
+        "cgrnds",
+        "cgrndl",
+        "surface_energy_closure_residual",
         "t_veg",
         "t_ref2m",
         "fpsn_patch",
@@ -3685,6 +4359,93 @@ def run_regional_pass(
             dtype=mlp_dtype,
         )
         return _target_dict_to_state_dtype(targets)
+
+    def _apply_energy_closed_soil_boundary(
+        targets: dict,
+        frac_veg_nosno: "torch.Tensor",
+        sabg_soil_diagnostic: "torch.Tensor | None" = None,
+    ) -> dict:
+        """Replace learned thermal boundaries with closed energy residuals.
+
+        The original primitive contract reconstructs soil and the common
+        derivative. The extended contract additionally reconstructs top-snow
+        and standing-water heat fluxes. Legacy checkpoints are unchanged.
+        """
+
+        if not has_energy_closed_soil_targets(targets):
+            return targets
+        if sabg_soil_diagnostic is not None:
+            sabg_diag = sabg_soil_diagnostic.to(device=device, dtype=dtype)
+            targets["sabg_soil_learned"] = targets["sabg_soil"]
+            targets["sabg_soil_diagnostic"] = sabg_diag
+            targets["sabg_soil_learned_minus_diagnostic"] = (
+                targets["sabg_soil"] - sabg_diag
+            )
+        if soil_energy_sabg_source == "diagnostic":
+            if sabg_soil_diagnostic is None:
+                raise RuntimeError(
+                    "Diagnostic soil-energy SABG was requested, but the model input "
+                    "does not contain the reconstructed sabg_snow feature"
+                )
+            targets["sabg_soil"] = targets["sabg_soil_diagnostic"]
+        qsoil = targets["qflx_ev_soil"]
+
+        def _match(value: "torch.Tensor") -> "torch.Tensor":
+            value_t = value.to(device=device, dtype=dtype)
+            while value_t.ndim < qsoil.ndim:
+                value_t = value_t.unsqueeze(0)
+            return value_t
+
+        t_soil_top = _match(state.t_soisno[..., 0])
+        t_grnd_now = _match(coupled_t_grnd_from_state_torch(state, device, dtype))
+        _, _, t_snow_top_now = _snow_energy_feature_tensors(state)
+        t_snow_top_now = _match(t_snow_top_now)
+        t_h2osfc_now = _match(
+            state.t_h2osfc if state.t_h2osfc is not None else state.t_soisno[..., 0]
+        )
+        flds_now = _match(flds.expand(-1, nens) if flds.shape[1] == 1 else flds)
+        frac_veg_now = frac_veg_nosno.to(device=device, dtype=dtype)
+        while frac_veg_now.ndim < qsoil.ndim:
+            frac_veg_now = frac_veg_now.unsqueeze(-1)
+        top_liq = state.h2osoi_liq[..., 0]
+        top_ice = state.h2osoi_ice[..., 0]
+        htvp_now = torch.where(
+            (top_liq <= 0.0) & (top_ice > 0.0),
+            torch.full_like(top_liq, LATENT_HEAT_SUBLIMATION),
+            torch.full_like(top_liq, LATENT_HEAT_VAPORIZATION),
+        )
+        htvp_now = _match(htvp_now)
+        full_surface_closure = has_energy_closed_surface_targets(targets)
+        if full_surface_closure:
+            hs_soil, hs_top_snow, hs_h2osfc, dhsdT, components = (
+                derive_surface_thermal_boundaries_torch(
+                    targets,
+                    forc_lwrad=flds_now,
+                    frac_veg_nosno=frac_veg_now,
+                    t_soil_top=t_soil_top,
+                    t_snow_top=t_snow_top_now,
+                    t_h2osfc=t_h2osfc_now,
+                    t_grnd=t_grnd_now,
+                    htvp=htvp_now,
+                    emg=0.96,
+                )
+            )
+            targets["hs_top_snow"] = hs_top_snow
+            targets["hs_h2osfc"] = hs_h2osfc
+        else:
+            hs_soil, dhsdT, components = derive_soil_thermal_boundary_torch(
+                targets,
+                forc_lwrad=flds_now,
+                frac_veg_nosno=frac_veg_now,
+                t_soil_top=t_soil_top,
+                t_grnd=t_grnd_now,
+                htvp=htvp_now,
+                emg=0.96,
+            )
+        targets["hs_soil"] = hs_soil
+        targets["dhsdT"] = dhsdT
+        targets["surface_energy_closure_residual"] = torch.zeros_like(hs_soil)
+        return targets
 
     def _cell_mean_tensor(value) -> "torch.Tensor":
         value_t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value, device=device, dtype=dtype)
@@ -4121,6 +4882,63 @@ def run_regional_pass(
         h2ocan_full.index_copy_(0, active_cell_idx, sparse_h2ocan)
         return targets, _state_with_h2ocan(state_in, h2ocan_full)
 
+    def _apply_canopy_interception_packed_pft(
+        bundle,
+        features: "torch.Tensor",
+        state_in: "_CCS",
+        cell_idx: "torch.Tensor",
+    ):
+        """Run individual-PFT interception in packed active-cell order."""
+        active_pos = _precip_active_cells_for_interception(bundle, features)
+        sparse_targets = _default_canopy_precip_targets(bundle, features)
+        h2ocan_global = (
+            state_in.h2ocan
+            if isinstance(state_in.h2ocan, torch.Tensor)
+            else torch.as_tensor(state_in.h2ocan, device=device, dtype=dtype)
+        ).to(device=device, dtype=dtype)
+        sparse_h2ocan = h2ocan_global.index_select(0, cell_idx)
+        while sparse_h2ocan.ndim < features.ndim - 1:
+            sparse_h2ocan = sparse_h2ocan.unsqueeze(-1)
+        sparse_h2ocan = torch.broadcast_to(sparse_h2ocan, features.shape[:-1]).clone()
+        if active_pos.numel() > 0:
+            active_global_cells = cell_idx.index_select(0, active_pos)
+            active_features = features.index_select(0, active_pos)
+            active_state = _select_state_cells_for_sparse_pairs(state_in, active_global_cells)
+            active_targets, active_state_out = _apply_canopy_interception_fast(
+                bundle,
+                active_features,
+                active_state,
+            )
+            for name, active_value in active_targets.items():
+                sparse_targets[name].index_copy_(0, active_pos, active_value)
+            active_h2ocan = (
+                active_state_out.h2ocan
+                if isinstance(active_state_out.h2ocan, torch.Tensor)
+                else torch.as_tensor(active_state_out.h2ocan, device=device, dtype=dtype)
+            ).to(device=device, dtype=dtype)
+            sparse_h2ocan.index_copy_(0, active_pos, active_h2ocan)
+        full_targets: dict[str, torch.Tensor] = {}
+        for name, sparse_value in sparse_targets.items():
+            sparse_value_t = (
+                sparse_value
+                if isinstance(sparse_value, torch.Tensor)
+                else torch.as_tensor(sparse_value, device=device, dtype=dtype)
+            ).to(device=device, dtype=dtype)
+            full_value = torch.zeros(
+                (ncell,) + tuple(sparse_value_t.shape[1:]),
+                device=device,
+                dtype=dtype,
+            )
+            full_value.index_copy_(0, cell_idx, sparse_value_t)
+            full_targets[name] = full_value
+        h2ocan_full = torch.zeros(
+            (ncell,) + tuple(sparse_h2ocan.shape[1:]),
+            device=device,
+            dtype=dtype,
+        )
+        h2ocan_full.index_copy_(0, cell_idx, sparse_h2ocan)
+        return full_targets, _state_with_h2ocan(state_in, h2ocan_full), sparse_h2ocan
+
     def _apply_canopy_interception_sparse_stack(bundle, features: "torch.Tensor", state_in: "_CCS"):
         if (
             not universal_sparse_mlp_enabled
@@ -4555,11 +5373,15 @@ def run_regional_pass(
             and universal_sparse_cell_idx_t is not None
             and 0 < universal_sparse_pft_idx_t.numel() < len(universal_batch_indices) * ncell
         ):
-            sparse_features = features[
-                universal_sparse_pft_idx_t,
-                universal_sparse_cell_idx_t,
-                ...,
-            ]
+            sparse_features = (
+                features
+                if features is universal_sparse_feature_batch
+                else features[
+                    universal_sparse_pft_idx_t,
+                    universal_sparse_cell_idx_t,
+                    ...,
+                ]
+            )
             sparse_targets, sparse_trait_vars = _predict_universal_trait_mean(
                 bundle,
                 sparse_features,
@@ -4799,6 +5621,8 @@ def run_regional_pass(
         sai_active: "torch.Tensor",
         frac_veg_active: "torch.Tensor",
         htop_active: "torch.Tensor",
+        update_state_features: bool = True,
+        update_vegetation_features: bool = True,
     ) -> "torch.Tensor":
         nonlocal universal_step_rootr
         assert universal_feature_batch is not None
@@ -4824,12 +5648,17 @@ def run_regional_pass(
             feature_forc_snow = _zeros_ncell1
             feature_frac_sno = _zeros_ncell1
             feature_snow_depth = _zeros_ncell1
+        feature_h2osno, feature_snow_layer_count, feature_t_snow_top = (
+            _snow_energy_feature_tensors(state)
+        )
 
-        _update_universal_dynamic_feature_columns((
+        qg_soil_diag = common["qg_soil_diag"]
+        _profile_call("feature_dynamic_columns", lambda: _update_universal_dynamic_feature_columns((
             tbot,
             qbot,
             psrf,
             forc_vpd,
+            qg_soil_diag,
             flds,
             feature_forc_rain,
             feature_forc_snow,
@@ -4859,18 +5688,56 @@ def run_regional_pass(
             common["t_grnd"],
             common["t_h2osfc_t"],
             _zeros_ncell1_geo,
-        ))
-        _copy_universal_profile("smp_l", common["smp_l"])
-        _copy_universal_profile("eff_porosity", common["eff_porosity"])
-        _copy_universal_profile("h2osoi_liqvol", common["liqvol"])
-        _copy_universal_profile("t_soisno", common["t_soisno_t"][..., :nlev_hydro_static])
+            common["h2osfc_t"],
+            feature_h2osno,
+            feature_snow_layer_count,
+            feature_t_snow_top,
+        ), update_state_features=update_state_features, update_vegetation_features=update_vegetation_features))
+        if _use_sparse_universal_feature_assembly():
+            _sync_packed_universal_columns_to_dense((
+                "forc_rain", "forc_snow", "elai_patch", "esai_patch",
+                "frac_veg_nosno_patch", "h2ocan",
+            ))
+        def _copy_dynamic_profiles() -> None:
+            _copy_universal_profile("smp_l", common["smp_l"])
+            _copy_universal_profile("eff_porosity", common["eff_porosity"])
+            _copy_universal_profile("h2osoi_liqvol", common["liqvol"])
+            _copy_universal_profile("t_soisno", common["t_soisno_t"][..., :nlev_hydro_static])
+        if update_state_features:
+            _profile_call("feature_profile_columns", _copy_dynamic_profiles)
 
-        btran, universal_step_rootr = _universal_btran_and_root_fraction_from_common(common)
+        btran = None
+        if update_state_features:
+            btran, universal_step_rootr = _profile_call(
+                "feature_derive_btran",
+                lambda: _universal_btran_and_root_fraction_from_common(common),
+            )
         if btran is not None and universal_btran_idx is not None:
-            universal_feature_batch[..., universal_btran_idx] = btran
-        if universal_soilbeta_idx is not None:
-            soilbeta_col = _soilbeta_from_common_features(common, frac_sno=feature_frac_sno)
-            universal_feature_batch[..., universal_soilbeta_idx] = soilbeta_col.unsqueeze(0).expand(len(universal_batch_indices), ncell, nens)
+            if _use_sparse_universal_feature_assembly():
+                assert universal_sparse_pft_idx_t is not None
+                assert universal_sparse_cell_idx_t is not None
+                assert universal_sparse_feature_batch is not None
+                universal_sparse_feature_batch[..., universal_btran_idx] = btran
+                universal_feature_batch[
+                    universal_sparse_pft_idx_t,
+                    universal_sparse_cell_idx_t,
+                    :,
+                    universal_btran_idx,
+                ] = btran
+            else:
+                universal_feature_batch[..., universal_btran_idx] = btran
+        if update_state_features and universal_soilbeta_idx is not None:
+            soilbeta_col = _profile_call(
+                "feature_derive_soilbeta",
+                lambda: _soilbeta_from_common_features(common, frac_sno=feature_frac_sno),
+            )
+            if _use_sparse_universal_feature_assembly():
+                assert universal_sparse_pft_idx_t is not None
+                assert universal_sparse_cell_idx_t is not None
+                assert universal_sparse_feature_batch is not None
+                universal_sparse_feature_batch[..., universal_soilbeta_idx] = soilbeta_col.index_select(0, universal_sparse_cell_idx_t)
+            else:
+                universal_feature_batch[..., universal_soilbeta_idx] = soilbeta_col.unsqueeze(0).expand(len(universal_batch_indices), ncell, nens)
         if universal_sabg_idx is not None:
             def _universal_static_col(name: str):
                 idx = universal_idx_map.get(name) if universal_idx_map is not None else None
@@ -4903,9 +5770,107 @@ def run_regional_pass(
                 max_dayl=max_dayl,
                 coszen_col=coszen,
             )
-            sabg_snow = (
-                _absorbed_ground_shortwave_torch(
-                    fsds,
+            def _derive_sabg_snow_feature():
+                if _use_sparse_universal_feature_assembly():
+                    assert universal_sparse_pft_idx_t is not None
+                    assert universal_sparse_cell_idx_t is not None
+                    pidx = universal_sparse_pft_idx_t
+                    cidx = universal_sparse_cell_idx_t
+
+                    def _pair_cell(value):
+                        value_t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value, device=device, dtype=dtype)
+                        value_t = value_t.to(device=device, dtype=dtype)
+                        return value_t.index_select(0, cidx)
+
+                    def _pair_static(name: str):
+                        value = _universal_static_col(name)
+                        return None if value is None else _gather_sparse_universal_value(value)
+
+                    pair_atmosphere = AtmosphericForcingInputs(
+                        forc_t=_pair_cell(tbot),
+                        forc_q=_pair_cell(qbot),
+                        forc_pbot=_pair_cell(psrf),
+                        forc_lwrad=_pair_cell(flds),
+                        forc_rain=_pair_cell(feature_forc_rain),
+                        forc_snow=_pair_cell(feature_forc_snow),
+                        forc_swrad=_pair_cell(fsds),
+                        forc_solad_vis=_pair_cell(forc_solad_vis),
+                        forc_solad_nir=_pair_cell(forc_solad_nir),
+                        forc_solai_vis=_pair_cell(forc_solai_vis),
+                        forc_solai_nir=_pair_cell(forc_solai_nir),
+                        wind_speed=_pair_cell(wind),
+                        forc_rho=_pair_cell(forc_rho),
+                        forc_pco2=_pair_cell(forc_pco2),
+                        dayl=_pair_cell(dayl),
+                        max_dayl=_pair_cell(max_dayl),
+                        coszen_col=_pair_cell(coszen),
+                    )
+                    pair_kwargs = dict(
+                        device=device,
+                        dtype=dtype,
+                        elai=lai_active[pidx, cidx].unsqueeze(-1).expand(-1, nens),
+                        esai=sai_active[pidx, cidx].unsqueeze(-1).expand(-1, nens),
+                        atmosphere=pair_atmosphere,
+                        soil_color=_gather_sparse_universal_value(shared_static.soil_color),
+                        h2osoi_vol_top=_pair_cell(common["h2osoi_vol"][..., 0]),
+                        rholvis=_pair_static("rholvis"),
+                        rholnir=_pair_static("rholnir"),
+                        taulvis=_pair_static("taulvis"),
+                        taulnir=_pair_static("taulnir"),
+                        rhosvis=_pair_static("rhosvis"),
+                        rhosnir=_pair_static("rhosnir"),
+                        tausvis=_pair_static("tausvis"),
+                        tausnir=_pair_static("tausnir"),
+                        xl=_pair_static("xl"),
+                        require_native_like=True,
+                        context="regional sparse universal sabg_snow feature",
+                    )
+                    pair_fsds = _pair_cell(fsds)
+                    if not snow_model_enabled:
+                        return _absorbed_ground_shortwave_torch(pair_fsds, **pair_kwargs)
+
+                    def _subset(value):
+                        if value is None:
+                            return None
+                        value_t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value, device=device)
+                        return value_t.to(device=device).index_select(0, cidx)
+
+                    pair_layers = None
+                    if state.snow_layers is not None:
+                        pair_layers = SnowLayerState(
+                            snl=_subset(state.snow_layers.snl),
+                            dz=_subset(state.snow_layers.dz),
+                            h2osoi_ice=_subset(state.snow_layers.h2osoi_ice),
+                            h2osoi_liq=_subset(state.snow_layers.h2osoi_liq),
+                            t_snow=_subset(state.snow_layers.t_snow),
+                            snw_rds=_subset(state.snow_layers.snw_rds),
+                        )
+                    pair_state = CoupledColumnState(
+                        h2osoi_liq=_subset(state.h2osoi_liq),
+                        h2osoi_ice=_subset(state.h2osoi_ice),
+                        h2ocan=_subset(state.h2ocan),
+                        h2osfc=_subset(state.h2osfc),
+                        frac_h2osfc=_subset(state.frac_h2osfc),
+                        frac_sno=_subset(state.frac_sno),
+                        zwt=_subset(state.zwt),
+                        t_soisno=_subset(state.t_soisno),
+                        wa=_subset(state.wa),
+                        t_h2osfc=_subset(state.t_h2osfc),
+                        t10=_subset(state.t10),
+                        t10_history=_subset(state.t10_history),
+                        h2osno=_subset(state.h2osno),
+                        snow_depth=_subset(state.snow_depth),
+                        snow_t=_subset(state.snow_t),
+                        snow_layers=pair_layers,
+                        int_snow=_subset(state.int_snow),
+                    )
+                    return sabg_snow_from_state_torch(
+                        pair_state,
+                        pair_fsds,
+                        _pair_cell(feature_frac_sno),
+                        **pair_kwargs,
+                    )
+                kwargs = dict(
                     device=device,
                     dtype=dtype,
                     elai=lai_active.unsqueeze(-1),
@@ -4925,36 +5890,52 @@ def run_regional_pass(
                     require_native_like=True,
                     context="regional universal sabg_snow feature",
                 )
-                if not snow_model_enabled
-                else sabg_snow_from_state_torch(
+                if not snow_model_enabled:
+                    return _absorbed_ground_shortwave_torch(fsds, **kwargs)
+                return sabg_snow_from_state_torch(
                     state,
                     fsds,
                     feature_frac_sno,
-                    device=device,
-                    dtype=dtype,
-                    elai=lai_active.unsqueeze(-1),
-                    esai=sai_active.unsqueeze(-1),
-                    atmosphere=sabg_atmosphere,
-                    soil_color=shared_static.soil_color,
-                    h2osoi_vol_top=common["h2osoi_vol"][..., 0],
-                    rholvis=_universal_static_col("rholvis"),
-                    rholnir=_universal_static_col("rholnir"),
-                    taulvis=_universal_static_col("taulvis"),
-                    taulnir=_universal_static_col("taulnir"),
-                    rhosvis=_universal_static_col("rhosvis"),
-                    rhosnir=_universal_static_col("rhosnir"),
-                    tausvis=_universal_static_col("tausvis"),
-                    tausnir=_universal_static_col("tausnir"),
-                    xl=_universal_static_col("xl"),
-                    require_native_like=True,
-                    context="regional universal sabg_snow feature",
+                    **kwargs,
                 )
+            sabg_snow = _profile_call(
+                "feature_derive_sabg_snow",
+                _derive_sabg_snow_feature,
             )
-            universal_feature_batch[..., universal_sabg_idx] = _broadcast_universal_feature_value(sabg_snow)
+            if _use_sparse_universal_feature_assembly():
+                assert universal_sparse_pft_idx_t is not None
+                assert universal_sparse_cell_idx_t is not None
+                assert universal_sparse_feature_batch is not None
+                universal_sparse_feature_batch[..., universal_sabg_idx] = sabg_snow
+                # SABG is also consumed by dense energy closure/blending.
+                universal_feature_batch[
+                    universal_sparse_pft_idx_t,
+                    universal_sparse_cell_idx_t,
+                    :,
+                    universal_sabg_idx,
+                ] = sabg_snow
+            else:
+                universal_feature_batch[..., universal_sabg_idx] = _broadcast_universal_feature_value(sabg_snow)
         return universal_feature_batch
+
+    _cached_common_feature_state: "dict | None" = None
+    _cached_vegetation_doy: int | None = None
+    _cached_vegetation_values: "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None" = None
+    _cached_universal_vegetation_values: "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None" = None
+    _state_feature_overrides_active = any(
+        value is not None
+        for value in (
+            soil_temperature_override_t,
+            soil_liquid_override_t,
+            soil_ice_override_t,
+            ground_temperature_override_t,
+            zwt_override_t,
+        )
+    )
 
     for step_i in range(n1h):
         state = _apply_soil_temperature_override(state, step_i)
+        state = _apply_soil_moisture_override(state, step_i)
         state = _apply_zwt_override(state, step_i)
         row = met_1h[step_i]  # (ncell, 7) – device tensor, float dtype
 
@@ -4997,17 +5978,33 @@ def run_regional_pass(
         forc_solad_vis, forc_solad_nir, forc_solai_vis, forc_solai_nir = _solar_components_from_fsds(fsds, coszen, doy)
         tv = torch.clamp(tbot * (1.0 + 0.61 * torch.clamp(qbot, min=0.0)), min=150.0)
         forc_rho = torch.clamp(psrf / (287.042 * tv), min=0.5, max=1.7)
-        lai_today = lai_by_doy[doy]  # (17, ncell) GPU tensor
-        sai_today = sai_by_doy[doy]
-        htop_today = htop_by_doy[doy]
-        hbot_today = hbot_by_doy[doy]
-        prescribed_lai_active = torch.stack([lai_today[pid] for pid in pft_ids], dim=0)  # (npft, ncell)
-        prescribed_sai_active = torch.stack([sai_today[pid] for pid in pft_ids], dim=0)
-        htop_active = torch.stack([htop_today[pid] for pid in pft_ids], dim=0)
-        hbot_active = torch.stack([hbot_today[pid] for pid in pft_ids], dim=0)
         no_carbon_prescribed_veg = carbon_model is None
+        update_vegetation_features = bool(
+            carbon_model is not None
+            or _cached_vegetation_values is None
+            or _cached_vegetation_doy != doy
+        )
+        if update_vegetation_features:
+            _vegetation_feature_refreshes += 1
+        if not update_vegetation_features:
+            assert _cached_vegetation_values is not None
+            (
+                lai_active_today,
+                sai_active_today,
+                htop_active_today,
+                frac_veg_active_today,
+            ) = _cached_vegetation_values
+        else:
+            lai_today = lai_by_doy[doy]  # (17, ncell) GPU tensor
+            sai_today = sai_by_doy[doy]
+            htop_today = htop_by_doy[doy]
+            hbot_today = hbot_by_doy[doy]
+            prescribed_lai_active = torch.stack([lai_today[pid] for pid in pft_ids], dim=0)  # (npft, ncell)
+            prescribed_sai_active = torch.stack([sai_today[pid] for pid in pft_ids], dim=0)
+            htop_active = torch.stack([htop_today[pid] for pid in pft_ids], dim=0)
+            hbot_active = torch.stack([hbot_today[pid] for pid in pft_ids], dim=0)
 
-        if carbon_model is not None:
+        if update_vegetation_features and carbon_model is not None:
             veg_structure = carbon_model.update_vegetation_structure_by_pft(
                 fallback_lai_by_pft=prescribed_lai_active,
                 fallback_sai_by_pft=prescribed_sai_active,
@@ -5020,30 +6017,69 @@ def run_regional_pass(
             sai_active_today = veg_structure["esai"]
             htop_active_today = veg_structure["htop"]
             frac_veg_active_today = veg_structure["frac_veg_nosno"]
-        else:
+        elif update_vegetation_features:
             lai_active_today = prescribed_lai_active
             sai_active_today = prescribed_sai_active
             htop_active_today = htop_active
             frac_veg_active_today = _prescribed_frac_veg_nosno(lai_active_today, sai_active_today)
-        if lai_scale != 1.0:
+        if update_vegetation_features and lai_scale != 1.0:
             lai_active_today = torch.clamp(lai_active_today * lai_scale, min=0.0)
-        if lai_add_applies:
+        if update_vegetation_features and lai_add_applies:
             lai_active_today = torch.clamp(lai_active_today + lai_add * _lai_add_pft_mask, min=0.0)
-        if sai_scale != 1.0:
+        if update_vegetation_features and sai_scale != 1.0:
             sai_active_today = torch.clamp(sai_active_today * sai_scale, min=0.0)
-        if no_carbon_prescribed_veg and (lai_add_applies or lai_scale != 1.0 or sai_scale != 1.0):
+        if update_vegetation_features and no_carbon_prescribed_veg and (lai_add_applies or lai_scale != 1.0 or sai_scale != 1.0):
             frac_veg_active_today = _prescribed_frac_veg_nosno(lai_active_today, sai_active_today)
-        elif (not no_carbon_prescribed_veg) and (lai_add_applies or lai_scale != 1.0):
+        elif update_vegetation_features and (not no_carbon_prescribed_veg) and (lai_add_applies or lai_scale != 1.0):
             frac_veg_active_today = (lai_active_today > 0.01).to(dtype=dtype)
-        common_feature_state = _profile_call(
-            "feature_common_state",
-            lambda: precompute_surface_feature_state_torch(
-                state,
-                shared_static,
-                device=device,
-                dtype=dtype,
+        if update_vegetation_features and carbon_model is None:
+            _cached_vegetation_doy = doy
+            _cached_vegetation_values = (
+                lai_active_today,
+                sai_active_today,
+                htop_active_today,
+                frac_veg_active_today,
+            )
+
+        update_state_features = bool(
+            _cached_common_feature_state is None or _state_feature_overrides_active
+        )
+        if update_state_features:
+            _state_feature_refreshes += 1
+        if update_state_features:
+            _cached_common_feature_state = _profile_call(
+                "feature_common_state",
+                lambda: precompute_surface_feature_state_torch(
+                    state,
+                    shared_static,
+                    device=device,
+                    dtype=dtype,
+                ),
+            )
+        assert _cached_common_feature_state is not None
+        common_feature_state = _cached_common_feature_state
+        # Canopy storage advances hourly even while soil/hydrology state is
+        # held between coupled physics calls.
+        common_feature_state["h2ocan_t"] = (
+            state.h2ocan.to(device=device, dtype=dtype)
+            if isinstance(state.h2ocan, torch.Tensor)
+            else torch.as_tensor(state.h2ocan, device=device, dtype=dtype)
+        )
+        # This diagnostic is column-only and was previously recomputed once
+        # for the universal model and again for every individual model.
+        common_feature_state["qg_soil_diag"] = _profile_call(
+            "feature_derive_surface_humidity",
+            lambda: diagnostic_soil_surface_humidity_torch(
+                common_feature_state["t_soisno_t"][..., 0],
+                common_feature_state["smp_l"][..., 0],
+                psrf,
+                qbot,
             ),
         )
+        if ground_temperature_override_t is not None:
+            common_feature_state["t_grnd"] = ground_temperature_override_t[
+                min(step_i, ground_temperature_override_t.shape[0] - 1)
+            ].unsqueeze(-1).expand(-1, nens)
 
         # Build AtmosphericForcingInputs with what we have. The four solar
         # bands are reconstructed from total FSDS so their sum is always
@@ -5075,10 +6111,19 @@ def run_regional_pass(
         )
         if _assemble_universal_features_this_step:
             assert _universal_batch_idx_t is not None
-            lai_universal_today = lai_active_today.index_select(0, _universal_batch_idx_t)
-            sai_universal_today = sai_active_today.index_select(0, _universal_batch_idx_t)
-            frac_veg_universal_today = frac_veg_active_today.index_select(0, _universal_batch_idx_t)
-            htop_universal_today = htop_active_today.index_select(0, _universal_batch_idx_t)
+            if update_vegetation_features or _cached_universal_vegetation_values is None:
+                _cached_universal_vegetation_values = (
+                    lai_active_today.index_select(0, _universal_batch_idx_t),
+                    sai_active_today.index_select(0, _universal_batch_idx_t),
+                    frac_veg_active_today.index_select(0, _universal_batch_idx_t),
+                    htop_active_today.index_select(0, _universal_batch_idx_t),
+                )
+            (
+                lai_universal_today,
+                sai_universal_today,
+                frac_veg_universal_today,
+                htop_universal_today,
+            ) = _cached_universal_vegetation_values
             _profile_call(
                 "feature_assembly_universal",
                 lambda: _assemble_universal_features(
@@ -5105,6 +6150,8 @@ def run_regional_pass(
                     sai_active=sai_universal_today,
                     frac_veg_active=frac_veg_universal_today,
                     htop_active=htop_universal_today,
+                    update_state_features=update_state_features,
+                    update_vegetation_features=update_vegetation_features,
                 ),
             )
 
@@ -5119,10 +6166,13 @@ def run_regional_pass(
         universal_canopy_precip_blended: "dict | None" = None
         ref_feat = None
         compute_ood_this_step = ood_diagnostics_stride > 0 and (step_i % ood_diagnostics_stride == 0)
+        if compute_ood_this_step and universal_sparse_feature_batch is not None:
+            _sync_packed_universal_columns_to_dense(tuple(universal_input_names_t))
         ood_max_col: "torch.Tensor | None" = None
         ood_frac_col: "torch.Tensor | None" = None
         ood_feature_col: "dict[str, torch.Tensor]" = {}
         btran_input_col: "torch.Tensor | None" = None
+        sabg_snow_input_col: "torch.Tensor | None" = None
         if _use_universal_fast_this_step:
             assert universal_feature_batch is not None
             universal_bundle = universal_ref_bundle
@@ -5132,6 +6182,11 @@ def run_regional_pass(
             if universal_btran_idx is not None:
                 btran_input_col = torch.sum(
                     w_universal_dev * universal_feature_batch[..., universal_btran_idx],
+                    dim=0,
+                )
+            if universal_sabg_idx is not None:
+                sabg_snow_input_col = torch.sum(
+                    w_universal_dev * universal_feature_batch[..., universal_sabg_idx],
                     dim=0,
                 )
             if compute_ood_this_step:
@@ -5180,8 +6235,28 @@ def run_regional_pass(
                     ic_h2o if isinstance(ic_h2o, torch.Tensor)
                     else torch.as_tensor(ic_h2o, device=device, dtype=dtype)
                 )
-            targets_stack, trait_var_stack = _predict_universal_targets_stack(universal_bundle, universal_feature_batch)
+                if universal_sparse_feature_batch is not None:
+                    assert universal_sparse_pft_idx_t is not None
+                    assert universal_sparse_cell_idx_t is not None
+                    universal_sparse_feature_batch[..., h2ocan_idx] = universal_feature_batch[
+                        universal_sparse_pft_idx_t,
+                        universal_sparse_cell_idx_t,
+                        ...,
+                        h2ocan_idx,
+                    ]
+            _universal_model_features = _universal_model_feature_batch()
+            assert _universal_model_features is not None
+            targets_stack, trait_var_stack = _predict_universal_targets_stack(universal_bundle, _universal_model_features)
             targets_stack = _clip_photosynthesis_targets(targets_stack)
+            targets_stack = _apply_energy_closed_soil_boundary(
+                targets_stack,
+                frac_veg_active_today.index_select(0, _universal_batch_idx_t),
+                (
+                    universal_feature_batch[..., universal_sabg_idx]
+                    if universal_sabg_idx is not None
+                    else None
+                ),
+            )
             if "hs_top_snow" not in targets_stack:
                 targets_stack["hs_top_snow"] = targets_stack["hs_soil"]
                 if trait_var_stack is not None and "hs_soil" in trait_var_stack:
@@ -5249,10 +6324,21 @@ def run_regional_pass(
                 h2ocan_idx = h2ocan_feat_idx[universal_batch_indices[0]]
                 if h2ocan_idx is not None:
                     universal_feature_batch[..., h2ocan_idx] = hybrid_universal_h2ocan_stack
+                    if universal_sparse_feature_batch is not None:
+                        assert universal_sparse_pft_idx_t is not None
+                        assert universal_sparse_cell_idx_t is not None
+                        universal_sparse_feature_batch[..., h2ocan_idx] = universal_feature_batch[
+                            universal_sparse_pft_idx_t,
+                            universal_sparse_cell_idx_t,
+                            ...,
+                            h2ocan_idx,
+                        ]
 
             for p_idx, (pft_id, p_bundle, p_static) in enumerate(
                 zip(pft_ids, pft_bundles, pft_statics)
             ):
+                individual_cells = sparse_cells_by_pft.get(p_idx)
+                individual_packed = p_idx in individual_sparse_feature_bufs
                 # Per-PFT exposed LAI/SAI for all cells (already GPU tensors).
                 lai_pft = lai_active_today[p_idx].unsqueeze(1)  # (ncell, 1)
                 sai_pft = sai_active_today[p_idx].unsqueeze(1)
@@ -5275,7 +6361,11 @@ def run_regional_pass(
                             p_idx,
                             p_bundle,
                             p_static,
-                            feat_bufs[p_idx],
+                            (
+                                individual_sparse_feature_bufs[p_idx]
+                                if individual_packed
+                                else feat_bufs[p_idx]
+                            ),
                             common_feature_state,
                             tbot=tbot,
                             qbot=qbot,
@@ -5300,6 +6390,9 @@ def run_regional_pass(
                             frac_veg=frac_veg,
                             htop_pft=htop_active_today[p_idx].unsqueeze(1),
                             atmosphere=atmosphere,
+                            update_state_features=update_state_features,
+                            update_vegetation_features=update_vegetation_features,
+                            cell_idx=individual_cells if individual_packed else None,
                         )
 
                     feat = _profile_call("feature_assembly_individual", _assemble_features)
@@ -5319,8 +6412,19 @@ def run_regional_pass(
                         hybrid_universal_h2ocan_stack[universal_batch_slot_for_pft[p_idx]],
                     )
                 else:
-                    sparse_cells = sparse_cells_by_pft.get(p_idx)
-                    if sparse_cells is not None:
+                    if individual_packed:
+                        assert individual_cells is not None
+                        canopy_precip, intercept_state, packed_h2ocan = _profile_call(
+                            "canopy_interception_individual",
+                            lambda: _apply_canopy_interception_packed_pft(
+                                p_bundle,
+                                feat,
+                                state,
+                                individual_cells,
+                            ),
+                        )
+                    elif individual_cells is not None:
+                        sparse_cells = individual_cells
                         candidate_cells = sparse_cells if sparse_cells.numel() < ncell else None
                         canopy_precip, intercept_state = _profile_call(
                             "canopy_interception_individual",
@@ -5338,19 +6442,52 @@ def run_regional_pass(
                         )
                 h2ocan_idx = h2ocan_feat_idx[p_idx]
                 if h2ocan_idx is not None:
-                    ic_h2o = intercept_state.h2ocan
-                    feat[..., h2ocan_idx] = (
-                        ic_h2o if isinstance(ic_h2o, torch.Tensor)
-                        else torch.as_tensor(ic_h2o, device=device, dtype=dtype)
-                    )
+                    if individual_packed:
+                        feat[..., h2ocan_idx] = packed_h2ocan
+                    else:
+                        ic_h2o = intercept_state.h2ocan
+                        feat[..., h2ocan_idx] = (
+                            ic_h2o if isinstance(ic_h2o, torch.Tensor)
+                            else torch.as_tensor(ic_h2o, device=device, dtype=dtype)
+                        )
 
                 _btran_idx = feat_idx_maps[p_idx].get("btran")
                 if _btran_idx is not None:
-                    weighted_btran = w_dev[p_idx] * feat[..., _btran_idx]
+                    if individual_packed:
+                        assert individual_cells is not None
+                        weighted_btran = torch.zeros((ncell, nens), device=device, dtype=dtype)
+                        weighted_btran.index_copy_(
+                            0,
+                            individual_cells,
+                            w_dev[p_idx].index_select(0, individual_cells) * feat[..., _btran_idx],
+                        )
+                    else:
+                        weighted_btran = w_dev[p_idx] * feat[..., _btran_idx]
                     btran_input_col = weighted_btran if btran_input_col is None else btran_input_col + weighted_btran
+                _sabg_snow_idx = feat_idx_maps[p_idx].get("sabg_snow")
+                if _sabg_snow_idx is not None:
+                    if individual_packed:
+                        assert individual_cells is not None
+                        weighted_sabg_snow = torch.zeros((ncell, nens), device=device, dtype=dtype)
+                        weighted_sabg_snow.index_copy_(
+                            0,
+                            individual_cells,
+                            w_dev[p_idx].index_select(0, individual_cells) * feat[..., _sabg_snow_idx],
+                        )
+                    else:
+                        weighted_sabg_snow = w_dev[p_idx] * feat[..., _sabg_snow_idx]
+                    sabg_snow_input_col = (
+                        weighted_sabg_snow
+                        if sabg_snow_input_col is None
+                        else sabg_snow_input_col + weighted_sabg_snow
+                    )
 
                 if p_idx == 0:
-                    ref_feat = feat
+                    ref_feat = feat_bufs[p_idx] if individual_packed else feat
+                    if individual_packed and "forc_t" in feat_idx_maps[p_idx]:
+                        # coupled_step uses this full-cell fallback to update
+                        # the running 10-day temperature when t_ref2m is absent.
+                        ref_feat[..., feat_idx_maps[p_idx]["forc_t"]] = tbot
                 if compute_ood_this_step:
                     zmax_sample, zfrac_sample = _profile_call(
                         "ood_diagnostics",
@@ -5362,11 +6499,24 @@ def run_regional_pass(
                     )
                     zmax_cell = zmax_sample.mean(1)
                     zfrac_cell = zfrac_sample.mean(1)
+                    if individual_packed:
+                        assert individual_cells is not None
+                        zmax_full = torch.zeros(ncell, device=device, dtype=dtype)
+                        zfrac_full = torch.zeros(ncell, device=device, dtype=dtype)
+                        zmax_full.index_copy_(0, individual_cells, zmax_cell)
+                        zfrac_full.index_copy_(0, individual_cells, zfrac_cell)
+                        zmax_cell = zmax_full
+                        zfrac_cell = zfrac_full
                     ood_max_col = zmax_cell if ood_max_col is None else torch.maximum(ood_max_col, zmax_cell)
                     weighted_zfrac = w_lai_dev[p_idx] * zfrac_cell
                     ood_frac_col = weighted_zfrac if ood_frac_col is None else ood_frac_col + weighted_zfrac
                     for name, (feat_idx, mean_value, inv_std_value) in pft_ood_feature_stats[p_idx].items():
                         z_cell = torch.abs((feat[..., feat_idx] - mean_value) * inv_std_value).mean(1)
+                        if individual_packed:
+                            assert individual_cells is not None
+                            z_cell_full = torch.zeros(ncell, device=device, dtype=dtype)
+                            z_cell_full.index_copy_(0, individual_cells, z_cell)
+                            z_cell = z_cell_full
                         weighted_z = w_lai_dev[p_idx] * z_cell
                         if name in ood_feature_col:
                             ood_feature_col[name] = ood_feature_col[name] + weighted_z
@@ -5387,6 +6537,42 @@ def run_regional_pass(
                     ),
                 )
                 targets = _clip_photosynthesis_targets(targets)
+                if individual_packed:
+                    assert individual_cells is not None
+                    dense_targets = {}
+                    for target_name, target_value in targets.items():
+                        target_value_t = (
+                            target_value
+                            if isinstance(target_value, torch.Tensor)
+                            else torch.as_tensor(target_value, device=device, dtype=dtype)
+                        ).to(device=device, dtype=dtype)
+                        full_value = torch.zeros(
+                            (ncell,) + tuple(target_value_t.shape[1:]),
+                            device=device,
+                            dtype=dtype,
+                        )
+                        full_value.index_copy_(0, individual_cells, target_value_t)
+                        dense_targets[target_name] = full_value
+                    targets = dense_targets
+                    sabg_for_closure = None
+                    if "sabg_snow" in feat_idx_maps[p_idx]:
+                        sabg_for_closure = torch.zeros((ncell, nens), device=device, dtype=dtype)
+                        sabg_for_closure.index_copy_(
+                            0,
+                            individual_cells,
+                            feat[..., feat_idx_maps[p_idx]["sabg_snow"]],
+                        )
+                else:
+                    sabg_for_closure = (
+                        feat[..., feat_idx_maps[p_idx]["sabg_snow"]]
+                        if "sabg_snow" in feat_idx_maps[p_idx]
+                        else None
+                    )
+                targets = _apply_energy_closed_soil_boundary(
+                    targets,
+                    frac_veg,
+                    sabg_for_closure,
+                )
                 if "hs_top_snow" not in targets:
                     targets["hs_top_snow"] = targets["hs_soil"]
                 targets = _bare_ground_target_fallback(targets, p_idx, stacked=False)
@@ -5409,8 +6595,19 @@ def run_regional_pass(
                 assert universal_feature_batch is not None
                 universal_bundle = universal_ref_bundle
                 assert universal_bundle is not None
-                targets_stack, trait_var_stack = _predict_universal_targets_stack(universal_bundle, universal_feature_batch)
+                _universal_model_features = _universal_model_feature_batch()
+                assert _universal_model_features is not None
+                targets_stack, trait_var_stack = _predict_universal_targets_stack(universal_bundle, _universal_model_features)
                 targets_stack = _clip_photosynthesis_targets(targets_stack)
+                targets_stack = _apply_energy_closed_soil_boundary(
+                    targets_stack,
+                    frac_veg_active_today.index_select(0, _universal_batch_idx_t),
+                    (
+                        universal_feature_batch[..., universal_sabg_idx]
+                        if universal_sabg_idx is not None
+                        else None
+                    ),
+                )
                 if "hs_top_snow" not in targets_stack:
                     targets_stack["hs_top_snow"] = targets_stack["hs_soil"]
                     if trait_var_stack is not None and "hs_soil" in trait_var_stack:
@@ -5573,6 +6770,8 @@ def run_regional_pass(
         blended["diag_h2osoi_ice_input"] = state.h2osoi_ice
         if btran_input_col is not None:
             blended["diag_btran_input"] = btran_input_col
+        if sabg_snow_input_col is not None:
+            blended["diag_sabg_snow_input"] = sabg_snow_input_col
         blended = _clip_thermal_boundary_targets(blended)
         if ground_heat_flux_override_t is not None:
             _gh_override = ground_heat_flux_override_t[min(int(step_i), ground_heat_flux_override_t.shape[0] - 1)]
@@ -5650,17 +6849,51 @@ def run_regional_pass(
             ):
                 q_tran_u = _physics_qtran_universal_accum / float(_physics_count)
                 rootr_u = _physics_universal_rootr
+                sparse_rootr = bool(
+                    _use_sparse_universal_feature_assembly()
+                    and rootr_u.ndim == 3
+                    and universal_sparse_pft_idx_t is not None
+                    and universal_sparse_cell_idx_t is not None
+                )
                 if universal_rootfr_btran is not None:
-                    rootr_fallback = universal_rootfr_btran.expand_as(rootr_u)
+                    rootr_fallback = (
+                        universal_rootfr_btran.index_select(0, universal_sparse_pft_idx_t).squeeze(1).expand_as(rootr_u)
+                        if sparse_rootr
+                        else universal_rootfr_btran.expand_as(rootr_u)
+                    )
                     rootr_sum = torch.sum(rootr_u, dim=-1, keepdim=True)
+                    q_tran_for_root = (
+                        q_tran_u[universal_sparse_pft_idx_t, universal_sparse_cell_idx_t, ...]
+                        if sparse_rootr
+                        else q_tran_u
+                    )
                     rootr_u = torch.where(
-                        (rootr_sum > 1.0e-12) | (q_tran_u.unsqueeze(-1) <= 1.0e-15),
+                        (rootr_sum > 1.0e-12) | (q_tran_for_root.unsqueeze(-1) <= 1.0e-15),
                         rootr_u,
                         rootr_fallback,
                     )
-                w_u = w_universal_dev
-                q_root_stack = q_tran_u.unsqueeze(-1) * rootr_u
-                rootsoi_acc = torch.sum(w_u.unsqueeze(-1) * q_root_stack, dim=0)
+                if sparse_rootr:
+                    assert universal_sparse_pft_idx_t is not None
+                    assert universal_sparse_cell_idx_t is not None
+                    q_tran_pair = q_tran_u[
+                        universal_sparse_pft_idx_t,
+                        universal_sparse_cell_idx_t,
+                        ...,
+                    ]
+                    weight_pair = w_universal_dev[
+                        universal_sparse_pft_idx_t,
+                        universal_sparse_cell_idx_t,
+                        ...,
+                    ]
+                    q_root_pair = weight_pair.unsqueeze(-1) * q_tran_pair.unsqueeze(-1) * rootr_u
+                    rootsoi_acc = torch.zeros(
+                        (ncell, nens, rootr_u.shape[-1]), device=device, dtype=dtype
+                    )
+                    rootsoi_acc.index_add_(0, universal_sparse_cell_idx_t, q_root_pair)
+                else:
+                    w_u = w_universal_dev
+                    q_root_stack = q_tran_u.unsqueeze(-1) * rootr_u
+                    rootsoi_acc = torch.sum(w_u.unsqueeze(-1) * q_root_stack, dim=0)
             for p_idx, qtran_acc in _physics_qtran_individual_accum.items():
                 q_tran = qtran_acc / float(_physics_count)
                 q_root = distribute_root_uptake(
@@ -5735,6 +6968,7 @@ def run_regional_pass(
                 soil_temperature_workspace=soil_temperature_workspace,
                 snow_model_enabled=snow_enabled_for_physics,
                 snow_scalar_only=snow_scalar_only,
+                blend_partial_snow_soil_temperature=blend_partial_snow_soil_temperature,
                 copy_surface_features=False,
                 snow_state_already_disabled=not snow_enabled_for_physics,
                 profile_sections=physics_detail_profile,
@@ -5749,8 +6983,10 @@ def run_regional_pass(
             _update_outlier("t_soil_raw", _cell_mean_tensor(last_result.state.t_soisno[..., 0]))
             state = _clip_state_temperatures(last_result.state)
             state = _apply_soil_temperature_override(state, step_i)
+            state = _apply_soil_moisture_override(state, step_i)
             state = _apply_zwt_override(state, step_i)
             last_result.state = state
+            _cached_common_feature_state = None
             _active_snow_cells = _active_snow_cell_count(state)
             _snow_present_cells = _snow_present_cell_count(state)
             _max_active_snow_cells = max(_max_active_snow_cells, _active_snow_cells)
@@ -5787,6 +7023,7 @@ def run_regional_pass(
             # the last coupled value until the next aggregated physics step.
             state = _clip_state_temperatures(blended_canopy_state)
             state = _apply_soil_temperature_override(state, step_i)
+            state = _apply_soil_moisture_override(state, step_i)
             state = _apply_zwt_override(state, step_i)
             if last_result is not None:
                 last_result.state = state
@@ -5989,25 +7226,15 @@ def run_regional_pass(
                     tausnir=_rad_static["tausnir"],
                     xl=_rad_static["xl"],
                 )
-                _numrad_diag_keys = {"albgrd_mean", "albgri_mean", "albd_mean", "albi_mean"}
                 def _reduce_shortwave_diag(_key: str, _value: "torch.Tensor") -> "torch.Tensor":
-                    _blended = _blend_pft_stack(_value)
-                    if _key in _numrad_diag_keys:
-                        if _blended.ndim == 3 and _blended.shape[-1] == 2:
-                            return _blended.mean(1)
-                        if _blended.ndim == 2 and _blended.shape[-1] == 2:
-                            return _blended
-                        raise RuntimeError(
-                            f"{_key} shortwave diagnostic has shape {tuple(_blended.shape)}, "
-                            "expected (ncell, nens, 2) or (ncell, 2)"
-                        )
-                    if _blended.ndim == 2:
-                        return _blended.mean(1)
-                    if _blended.ndim == 1:
-                        return _blended
-                    raise RuntimeError(
-                        f"{_key} shortwave diagnostic has shape {tuple(_blended.shape)}, "
-                        "expected (ncell, nens) or (ncell,)"
+                    return _reduce_regional_shortwave_diagnostic(
+                        _key,
+                        _value,
+                        pft_weights=w_dev,
+                        universal_pft_weights=w_universal_dev,
+                        universal_pft_count=len(universal_batch_indices),
+                        device=device,
+                        dtype=dtype,
                     )
                 _shortwave_diag = {
                     _key: _reduce_shortwave_diag(_key, _value)
@@ -6103,9 +7330,28 @@ def run_regional_pass(
                 if _ev_h2osfc is not None
                 else torch.zeros_like(_frac_h2osfc_flux)
             )
+            # Hydrology may supply-limit the potential bare-soil flux before
+            # removing water from layer 1.  Report that realized, already
+            # area-weighted flux so QSOIL and latent heat match the water
+            # actually exchanged with the soil column.
+            _hydro_for_evap = (
+                getattr(last_result, "hydrology_result", None)
+                if last_result is not None
+                else None
+            )
+            _realized_soil_evap = (
+                getattr(_hydro_for_evap, "qflx_soil_evap", None)
+                if _hydro_for_evap is not None
+                else None
+            )
+            _soil_evap_full = (
+                _diag_tensor(_realized_soil_evap)
+                if _realized_soil_evap is not None
+                else _soil_frac_flux * _ev_soil_full
+            )
             _evap_soi_full = (
                 _frac_sno_flux * _ev_snow_full
-                + _soil_frac_flux * _ev_soil_full
+                + _soil_evap_full
                 + _frac_h2osfc_flux * _ev_h2osfc_full
             )
             _evap_soi_diag = _evap_soi_full.mean(1)
@@ -6158,6 +7404,26 @@ def run_regional_pass(
             _hs_top_snow_diag = _target_diag("hs_top_snow")
             _hs_h2osfc_diag = _target_diag("hs_h2osfc")
             _dhsdT_diag = _target_diag("dhsdT")
+            _energy_diag = {}
+            if "surface_energy_closure_residual" in blended:
+                _energy_diag = {
+                    "eflx_sh_soil_mean": _target_diag("eflx_sh_soil"),
+                    "sabg_soil_mean": _target_diag("sabg_soil"),
+                    "sabg_soil_learned_mean": _target_diag("sabg_soil_learned"),
+                    "sabg_soil_diagnostic_mean": _target_diag("sabg_soil_diagnostic"),
+                    "sabg_soil_learned_minus_diagnostic_mean": _target_diag(
+                        "sabg_soil_learned_minus_diagnostic"
+                    ),
+                    "dlrad_mean": _target_diag("dlrad"),
+                    "cgrnds_mean": _target_diag("cgrnds"),
+                    "cgrndl_mean": _target_diag("cgrndl"),
+                    "surface_energy_closure_residual_mean": _target_diag(
+                        "surface_energy_closure_residual"
+                    ),
+                }
+                _closure_residual_cumulative.add_(
+                    _energy_diag["surface_energy_closure_residual_mean"] * dt
+                )
             _tg_full = _diag_tensor(coupled_t_grnd_from_state_torch(state, device, dtype))
             _tg_diag = _tg_full.mean(1)
 
@@ -6329,6 +7595,8 @@ def run_regional_pass(
                     ("snow_depth_eff_mean", _snow_depth_eff_diag),
                 ):
                     _append_hourly_h0(_key, _value)
+                for _key, _value in _energy_diag.items():
+                    _append_hourly_h0(_key, _value)
                 for _key, _value in _shortwave_diag.items():
                     _append_hourly_h0(_key, _value)
             if record_daily_diag_maps:
@@ -6367,6 +7635,11 @@ def run_regional_pass(
                         _daily_shortwave_sum[_key].add_(_value)
                     else:
                         _daily_shortwave_sum[_key] = _value.clone()
+                for _key, _value in _energy_diag.items():
+                    if _key in _daily_energy_sum:
+                        _daily_energy_sum[_key].add_(_value)
+                    else:
+                        _daily_energy_sum[_key] = _value.clone()
                 _water_diag_nlev = min(_WATER_DIAG_NLEV, nlev_hydro_static)
                 _soil_liq_full = _diag_tensor(state.h2osoi_liq[..., :nlev_hydro_static])
                 _soil_ice_full = _diag_tensor(state.h2osoi_ice[..., :nlev_hydro_static])
@@ -6506,6 +7779,11 @@ def run_regional_pass(
                         _acc_shortwave_diag[_key].add_(_value)
                     else:
                         _acc_shortwave_diag[_key] = _value.clone()
+                for _key, _value in _energy_diag.items():
+                    if _key in _acc_energy_diag:
+                        _acc_energy_diag[_key].add_(_value)
+                    else:
+                        _acc_energy_diag[_key] = _value.clone()
                 for _key, _value in _trait_std_diag.items():
                     if _key in _acc_trait_std:
                         _acc_trait_std[_key].add_(_value)
@@ -6704,6 +7982,14 @@ def run_regional_pass(
                             .numpy()
                             .astype(np.float32, copy=False)
                         )
+                    for _key, _value_sum in _daily_energy_sum.items():
+                        _daily_energy_rows.setdefault(_key, []).append(
+                            (_value_sum / max(_daily_diag_count, 1))
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32, copy=False)
+                        )
                     _daily_diag_sum = None
                     _daily_day_count_sum = None
                     _daily_night_count_sum = None
@@ -6713,6 +7999,7 @@ def run_regional_pass(
                     _daily_runoff_ens_sum = None
                     _daily_trait_std_sum.clear()
                     _daily_shortwave_sum.clear()
+                    _daily_energy_sum.clear()
                     _daily_elm_h0_tsoi_sum = None
                     _daily_elm_h0_h2osoi_sum = None
                     _daily_diag_count = 0
@@ -6852,6 +8139,12 @@ def run_regional_pass(
             diag_maps["snow_depth_eff_mean"] = (_acc_snow_depth_eff / _acc_n).cpu().numpy()  # (ncell,)
         for _key, _acc_value in _acc_shortwave_diag.items():
             diag_maps[_key] = (_acc_value / _acc_n).cpu().numpy()
+        for _key, _acc_value in _acc_energy_diag.items():
+            diag_maps[_key] = (_acc_value / _acc_n).cpu().numpy()
+        if _acc_energy_diag:
+            diag_maps["surface_energy_closure_residual_cumulative_j_m2"] = (
+                _closure_residual_cumulative.cpu().numpy()
+            )
         for _key, _acc_value in _acc_trait_std.items():
             diag_maps[_key] = (_acc_value / _acc_n).cpu().numpy()  # (ncell,)
         if _acc_ood_n > 0 and _acc_ood_max_z is not None and _acc_ood_frac is not None:
@@ -6916,6 +8209,10 @@ def run_regional_pass(
             shortwave_daily = np.stack(rows, axis=0).astype(np.float32, copy=False)
             if shortwave_daily.shape[0] == daily_stack.shape[1]:
                 diag_maps["_daily"][key] = shortwave_daily
+        for key, rows in _daily_energy_rows.items():
+            energy_daily = np.stack(rows, axis=0).astype(np.float32, copy=False)
+            if energy_daily.shape[0] == daily_stack.shape[1]:
+                diag_maps["_daily"][key] = energy_daily
         for key, rows in _daily_day_night_rows.items():
             split_values = np.stack(rows, axis=0).astype(np.float32, copy=False)
             if split_values.shape[0] == daily_stack.shape[1]:
@@ -7062,6 +8359,8 @@ def run_regional_pass(
         "final_active_snow_cells": int(_active_snow_cells),
         "physics_step_s": physics_step_seconds,
         "universal_fast_steps": _universal_fast_steps,
+        "state_feature_refreshes": _state_feature_refreshes,
+        "vegetation_feature_refreshes": _vegetation_feature_refreshes,
         "elapsed_s": elapsed,
     }, diag_maps
 
@@ -7127,11 +8426,34 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--timed-iters", type=int, default=3)
     p.add_argument("--disable-snow-model", action="store_true")
     p.add_argument(
+        "--snow-grain-aging",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable SNICAR snow grain aging when the snow model is active.",
+    )
+    p.add_argument(
+        "--snicar-aging-file",
+        type=Path,
+        default=None,
+        help=(
+            "SNICAR grain-aging lookup table. When omitted, search the CLM input-data "
+            "and E3SM-emulator locations adjacent to this project."
+        ),
+    )
+    p.add_argument(
         "--snow-scalar-only",
         action="store_true",
         help=(
             "Diagnostic snow mode: keep H2OSNO/FSNO/snow_depth but never "
             "promote snow to resolved active snow layers."
+        ),
+    )
+    p.add_argument(
+        "--blend-partial-snow-soil-temperature",
+        action="store_true",
+        help=(
+            "Diagnostic: blend snow-covered and bare-soil thermal solutions "
+            "by frac_sno for partially snow-covered columns."
         ),
     )
     p.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None,
@@ -7204,12 +8526,52 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--universal-all-pfts",
+        action="store_true",
+        help=(
+            "Regional universal mode: use patch_-1/model.pt for PFTs 0 and 14 "
+            "as well as the other active PFTs. This is intended for universal "
+            "checkpoints trained with rows from all PFT types; otherwise PFTs "
+            "0 and 14 continue to require individual checkpoints."
+        ),
+    )
+    p.add_argument(
         "--regional-sparse-pft-batch",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
             "Regional universal mode: evaluate the universal MLP only for nonzero "
             "PFT-cell area weights, then scatter results back for blending."
+        ),
+    )
+    p.add_argument(
+        "--regional-sparse-individual-features",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Regional mode: assemble and evaluate patch-specific models only over "
+            "their nonzero-area cells when the snow model is disabled."
+        ),
+    )
+    p.add_argument(
+        "--regional-pft-min-percent",
+        type=float,
+        default=0.0,
+        help=(
+            "Regional mode: drop PFT-cell fractions below this percentage-point "
+            "threshold and renormalize the retained fractions within each cell. "
+            "Zero disables pruning."
+        ),
+    )
+    p.add_argument(
+        "--regional-exclude-pft",
+        nargs="+",
+        type=int,
+        default=(),
+        metavar="PFT",
+        help=(
+            "Regional mode: exclude one or more PFT indices, renormalize the "
+            "remaining fractions, and discard cells containing only excluded PFTs."
         ),
     )
     p.add_argument(
@@ -7725,6 +9087,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--regional-initial-soil-temp-elm-history",
+        type=Path,
+        default=None,
+        help=(
+            "Regional mode: initialize replay t_soisno once from ELM TSOI "
+            "record 0 in this h0 file or case run directory. Temperatures are "
+            "prognostic after initialization."
+        ),
+    )
+    p.add_argument(
         "--regional-soil-temp-override-nlev",
         type=int,
         choices=range(1, 16),
@@ -7734,6 +9106,38 @@ def parse_args() -> argparse.Namespace:
             "Number of leading TSOI levels to clamp when "
             "--regional-soil-temp-override-elm-history is used. Use 1 to force "
             "only level 1 and leave deeper soil temperatures prognostic."
+        ),
+    )
+    p.add_argument(
+        "--regional-ground-temp-override-elm-history",
+        type=Path,
+        default=None,
+        help=(
+            "Diagnostic regional mode: replace the MLP t_grnd input with "
+            "lag-aligned daily ELM TG from this h0 file or case run directory. "
+            "Daily values are held constant through each replay day."
+        ),
+    )
+    p.add_argument(
+        "--regional-soil-moisture-override-elm-history",
+        type=Path,
+        default=None,
+        help=(
+            "Diagnostic regional mode: clamp replay h2osoi_liq and h2osoi_ice "
+            "to lag-aligned daily ELM SOILLIQ and SOILICE from this h0 file or "
+            "case run directory. Daily values are held constant through each "
+            "replay day."
+        ),
+    )
+    p.add_argument(
+        "--regional-soil-moisture-override-nlev",
+        type=int,
+        choices=range(1, 16),
+        default=15,
+        metavar="N",
+        help=(
+            "Number of leading SOILLIQ/SOILICE levels to clamp when "
+            "--regional-soil-moisture-override-elm-history is used."
         ),
     )
     p.add_argument(
@@ -7817,6 +9221,16 @@ def parse_args() -> argparse.Namespace:
             "Regional safety clamp for learned thermal boundary targets "
             "(hs_soil, hs_top_snow, hs_h2osfc), expressed as training "
             "standard deviations around the model target mean. Use <=0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--soil-energy-sabg-source",
+        choices=("learned", "diagnostic"),
+        default="learned",
+        help=(
+            "For primitive energy-closure checkpoints, use either the MLP-predicted "
+            "sabg_soil target or Python's native-like two-stream absorbed-ground "
+            "shortwave diagnostic. This supports an otherwise identical A/B replay."
         ),
     )
     p.add_argument(
@@ -8287,7 +9701,68 @@ def _run_regional_benchmark(
     # ------------------------------------------------------------------
     # 2. Determine which PFTs have non-zero area across any active cell.
     # ------------------------------------------------------------------
-    pct = surf["pct_nat_pft"]   # (17, ncell)
+    pct = np.asarray(surf["pct_nat_pft"], dtype=np.float64)   # (17, ncell)
+    excluded_pfts = sorted(set(int(pft) for pft in args.regional_exclude_pft))
+    if excluded_pfts:
+        invalid = [pft for pft in excluded_pfts if pft < 0 or pft >= pct.shape[0]]
+        if invalid:
+            raise SystemExit(
+                f"--regional-exclude-pft values must be in [0, {pct.shape[0] - 1}], got {invalid}"
+            )
+        if args.pft is not None and int(args.pft) in excluded_pfts:
+            raise SystemExit("--pft cannot also be listed in --regional-exclude-pft")
+        original_total = max(float(pct.sum()), 1.0e-12)
+        excluded_area_pct = 100.0 * float(pct[excluded_pfts, :].sum()) / original_total
+        pct = pct.copy()
+        pct[excluded_pfts, :] = 0.0
+        keep_cells = pct.sum(axis=0) > 1.0e-12
+        removed_cells = int(np.count_nonzero(~keep_cells))
+        if not np.any(keep_cells):
+            raise SystemExit(
+                f"Excluding PFTs {excluded_pfts} removes every selected regional cell"
+            )
+        if removed_cells:
+            keep_idx = np.where(keep_cells)[0]
+            surf = _subset_regional_surf_cells(surf, keep_idx)
+            pct = pct[:, keep_idx]
+            ncell = int(keep_idx.size)
+        surf["pct_nat_pft"] = pct.astype(np.float32)
+        print(
+            f"  Excluding PFTs {excluded_pfts}: removed {excluded_area_pct:.2f}% of "
+            f"original PFT area and {removed_cells:,} cells with no remaining PFT; "
+            f"renormalizing {ncell:,} retained cells",
+            flush=True,
+        )
+    pft_min_percent = float(args.regional_pft_min_percent)
+    if pft_min_percent < 0.0:
+        raise SystemExit("--regional-pft-min-percent must be nonnegative")
+    if pft_min_percent > 0.0 and args.pft is None:
+        pct_original = pct
+        pct = pct_original.copy()
+        drop = (pct > 0.0) & (pct < pft_min_percent)
+        pct[drop] = 0.0
+        empty = pct.sum(axis=0) <= 1.0e-12
+        if np.any(empty):
+            # Never erase a cell completely, even for an aggressive threshold.
+            empty_idx = np.where(empty)[0]
+            dominant = np.argmax(pct_original[:, empty_idx], axis=0)
+            pct[dominant, empty_idx] = pct_original[dominant, empty_idx]
+            drop[dominant, empty_idx] = False
+        removed_pairs = int(np.count_nonzero(drop))
+        original_pairs = int(np.count_nonzero(pct_original > 0.0))
+        removed_area_pct = 100.0 * float(pct_original[drop].sum()) / max(
+            float(pct_original.sum()), 1.0e-12
+        )
+        affected_cells = int(np.count_nonzero(np.any(drop, axis=0)))
+        surf["pct_nat_pft"] = pct.astype(np.float32)
+        print(
+            f"  PFT fraction pruning < {pft_min_percent:g}%: removed "
+            f"{removed_pairs:,}/{original_pairs:,} PFT-cell pairs "
+            f"({100.0 * removed_pairs / max(original_pairs, 1):.2f}%), "
+            f"redistributing {removed_area_pct:.3f}% of domain area across retained PFTs "
+            f"in {affected_cells:,} cells",
+            flush=True,
+        )
     natural_pft_present = sorted(int(p) for p in np.where(np.any(pct > 0.0, axis=1))[0])
     print(f"  PFTs present: {natural_pft_present}")
     if args.pft is not None:
@@ -8334,6 +9809,10 @@ def _run_regional_benchmark(
         tausvis_all = np.asarray(ds.variables["tausvis"][:], dtype=np.float64)
         tausnir_all = np.asarray(ds.variables["tausnir"][:], dtype=np.float64)
         xl_all      = np.asarray(ds.variables["xl"][:],      dtype=np.float64)
+        rsub_top_globalmax = (
+            float(np.asarray(ds.variables["rsub_top_globalmax"][:]).reshape(-1)[0])
+            if "rsub_top_globalmax" in ds.variables else 10.0
+        )
     valid_flnr_mask = np.isfinite(flnr_all) & (flnr_all > 0.0)
     if valid_flnr_mask.size > 0:
         valid_flnr_mask[0] = False
@@ -8368,7 +9847,7 @@ def _run_regional_benchmark(
     for pft_id in pft_present:
         model_file = args.model_dir / f"patch_{pft_id}" / "model.pt"
         if args.universal:
-            if int(pft_id) in (0, 14):
+            if int(pft_id) in (0, 14) and not args.universal_all_pfts:
                 if not model_file.exists():
                     raise FileNotFoundError(
                         f"--universal now uses the individual PFT {int(pft_id)} model, "
@@ -8445,6 +9924,7 @@ def _run_regional_benchmark(
             tausvis=float(tausvis_all[pft_id]),
             tausnir=float(tausnir_all[pft_id]),
             xl=float(xl_all[pft_id]),
+            rsub_top_globalmax=rsub_top_globalmax,
             device=device,
             dtype=dtype,
         )
@@ -8460,6 +9940,7 @@ def _run_regional_benchmark(
     if args.compile_physics and hasattr(torch, "compile"):
         from . import elm_hydrology_torch as _hyd_mod
         from . import elm_soil_temperature_torch as _temp_mod
+        from . import coupled_surface_hydrology_soiltemp as _coupled_mod
         if device.type == "cuda":
             _hyd_mod.batched_tridiagonal_torch = torch.compile(
                 _hyd_mod.batched_tridiagonal_torch, fullgraph=True, dynamic=True
@@ -8477,10 +9958,17 @@ def _run_regional_benchmark(
             )
         else:
             print("  [torch.compile] leaving soil-temperature Thomas solver eager on CPU")
-        _hyd_mod.hydrology_torch = torch.compile(_hyd_mod.hydrology_torch, fullgraph=False)
-        _temp_mod.soil_temperature_step_torch = torch.compile(
+        _compiled_hydrology_torch = torch.compile(_hyd_mod.hydrology_torch, fullgraph=False)
+        _compiled_soil_temperature_step_torch = torch.compile(
             _temp_mod.soil_temperature_step_torch, fullgraph=False
         )
+        # coupled_surface_hydrology_soiltemp imports these functions directly,
+        # so replacing only the defining module's attribute leaves its aliases
+        # eager.  Install the compiled callables at both lookup sites.
+        _hyd_mod.hydrology_torch = _compiled_hydrology_torch
+        _coupled_mod.hydrology_torch = _compiled_hydrology_torch
+        _temp_mod.soil_temperature_step_torch = _compiled_soil_temperature_step_torch
+        _coupled_mod.soil_temperature_step_torch = _compiled_soil_temperature_step_torch
 
     if args.online_carbon and (args.regional_restart_in is not None or args.regional_restart_out is not None):
         raise SystemExit(
@@ -8508,6 +9996,33 @@ def _run_regional_benchmark(
         snow_model_enabled=snow_model_enabled,
         snow_scalar_only=args.snow_scalar_only,
     )
+    if args.regional_initial_soil_temp_elm_history is not None:
+        initial_tsoi = _read_elm_tsoi_history(
+            _find_elm_history_file(args.regional_initial_soil_temp_elm_history, args.year),
+            ncell,
+        )[0]
+        state_nlev = int(state.t_soisno.shape[-1])
+        if initial_tsoi.shape[-1] < state_nlev:
+            initial_tsoi = np.concatenate(
+                [
+                    initial_tsoi,
+                    np.broadcast_to(
+                        initial_tsoi[:, -1:],
+                        (initial_tsoi.shape[0], state_nlev - initial_tsoi.shape[-1]),
+                    ),
+                ],
+                axis=-1,
+            )
+        initial_tsoi_t = torch.as_tensor(
+            initial_tsoi[:, None, :state_nlev],
+            device=device,
+            dtype=dtype,
+        ).expand(ncell, args.regional_ensemble_size, state_nlev).clone()
+        state.t_soisno = initial_tsoi_t
+        print(
+            "  initialized regional soil temperatures once from ELM TSOI record 0: "
+            f"{args.regional_initial_soil_temp_elm_history}"
+        )
     carbon_model = None
     if args.online_carbon:
         from .coupled_surface_hydrology_soiltemp import OnlineDailyCarbonModel
@@ -8538,7 +10053,8 @@ def _run_regional_benchmark(
         f"  device={device.type}  dtype={dtype}  mlp_dtype={mlp_dtype}  ncell={ncell:,}"
         f"  npft={len(pft_present)}  nens={args.regional_ensemble_size}"
         f"  ntrait={args.regional_trait_ensemble_size}  "
-        f"snow={'scalar-only' if snow_model_enabled and args.snow_scalar_only else snow_model_enabled}"
+        f"snow={'scalar-only' if snow_model_enabled and args.snow_scalar_only else snow_model_enabled}  "
+        f"soil_energy_sabg={args.soil_energy_sabg_source}"
     )
     print()
 
@@ -8601,6 +10117,7 @@ def _run_regional_benchmark(
             "ice_vol": [],
             "frac_h2osfc": [],
             "frac_sno": [],
+            "frac_sno_input": [],
             "h2osno": [],
             "int_snow": [],
             "snow_depth": [],
@@ -8609,6 +10126,10 @@ def _run_regional_benchmark(
             "snow_ice_total": [],
             "snow_liq_total": [],
             "snow_t_min": [],
+            "snow_grain_radius_top": [],
+            "snow_albedo_vis": [],
+            "snow_albedo_nir": [],
+            "sabg_snow_input": [],
             "forc_t": [],
             "forc_pbot": [],
             "forc_swrad": [],
@@ -8641,7 +10162,17 @@ def _run_regional_benchmark(
             "fn_h2osfc_old": [],
             "fn_h2osfc_new": [],
             "tk_h2osfc": [],
+            "partial_snow_blend_energy_residual_uncorrected": [],
+            "partial_snow_blend_energy_residual_corrected": [],
+            "partial_snow_blend_water_residual": [],
         }
+        for _snow_lev in range(MAX_SNOW_LAYERS):
+            regional_ts_records[f"snow_dz_lev{_snow_lev + 1}"] = []
+            regional_ts_records[f"snow_ice_lev{_snow_lev + 1}"] = []
+            regional_ts_records[f"snow_liq_lev{_snow_lev + 1}"] = []
+            regional_ts_records[f"snow_t_lev{_snow_lev + 1}"] = []
+            regional_ts_records[f"qflx_snow_melt_lev{_snow_lev + 1}"] = []
+            regional_ts_records[f"qflx_snow_freeze_lev{_snow_lev + 1}"] = []
         for _pft_id in pft_present:
             _pft_label = f"pft_{int(_pft_id)}"
             regional_ts_records[f"{_pft_label}_area_weight"] = []
@@ -8753,6 +10284,16 @@ def _run_regional_benchmark(
             out = np.min(masked, axis=-1)
             return np.where(np.isfinite(out), out, np.nan)
 
+        def _snow_layer_top_grain_radius(state_step):
+            snow_layers = state_step.snow_layers
+            if snow_layers is None or snow_layers.snw_rds is None:
+                return None
+            rds = np.asarray(_to_np(snow_layers.snw_rds), dtype=np.float64)
+            snl = np.asarray(_to_np(snow_layers.snl), dtype=np.int32)
+            if rds.ndim < 2:
+                return None
+            return np.where(snl < 0, rds[..., 0], np.nan)
+
         def _target_from(result, name: str):
             return (getattr(result, "surface_targets", None) or {}).get(name)
 
@@ -8847,8 +10388,13 @@ def _run_regional_benchmark(
                     state_step.h2osoi_ice[..., _ice_lev] / (dz_profile_ts[_ice_lev] * 1000.0),
                 )
                 _record_ts_value(f"h2osoi_ice_lev{_ice_lev + 1}", state_step.h2osoi_ice[..., _ice_lev])
-            _record_ts_value("frac_h2osfc", blended["diag_frac_h2osfc_input"])
+            # Record both surface fractions from the same post-physics state.
+            # On a physics hour the feature input above is the pre-step water
+            # fraction, while frac_sno below is post-step; mixing those two can
+            # falsely report overlap even after native-style reconciliation.
+            _record_ts_value("frac_h2osfc", state_step.frac_h2osfc)
             _record_ts_value("frac_sno", state_step.frac_sno)
+            _record_ts_value("frac_sno_input", blended.get("diag_frac_sno_input"))
             _record_ts_value("h2osno", state_step.h2osno)
             _record_ts_value("int_snow", getattr(state_step, "int_snow", None))
             _record_ts_value("snow_depth", state_step.snow_depth)
@@ -8857,9 +10403,48 @@ def _run_regional_benchmark(
                 None if state_step.frac_sno is None or state_step.snow_depth is None else state_step.frac_sno * state_step.snow_depth,
             )
             _record_ts_value("snow_snl", getattr(state_step.snow_layers, "snl", None) if state_step.snow_layers is not None else None)
+            for _snow_lev in range(MAX_SNOW_LAYERS):
+                for _field, _prefix in (
+                    ("dz", "snow_dz"),
+                    ("h2osoi_ice", "snow_ice"),
+                    ("h2osoi_liq", "snow_liq"),
+                    ("t_snow", "snow_t"),
+                ):
+                    _layer_values = (
+                        None
+                        if state_step.snow_layers is None
+                        else getattr(state_step.snow_layers, _field, None)
+                    )
+                    _record_ts_value(
+                        f"{_prefix}_lev{_snow_lev + 1}",
+                        None if _layer_values is None else _layer_values[..., _snow_lev],
+                    )
             _record_ts_value("snow_ice_total", _snow_layer_sum(state_step, "h2osoi_ice"))
             _record_ts_value("snow_liq_total", _snow_layer_sum(state_step, "h2osoi_liq"))
             _record_ts_value("snow_t_min", _snow_layer_min_temp(state_step))
+            _top_grain_radius = _snow_layer_top_grain_radius(state_step)
+            _record_ts_value("snow_grain_radius_top", _top_grain_radius)
+            if _top_grain_radius is None:
+                _record_ts_value("snow_albedo_vis", None)
+                _record_ts_value("snow_albedo_nir", None)
+            else:
+                _snow_albedo_vis, _snow_albedo_nir = _snow_albedo_from_grain_radius(_top_grain_radius)
+                _record_ts_value("snow_albedo_vis", _snow_albedo_vis)
+                _record_ts_value("snow_albedo_nir", _snow_albedo_nir)
+            _record_ts_value("sabg_snow_input", blended.get("diag_sabg_snow_input"))
+            _soil_temperature_result = getattr(last_result, "soil_temperature_result", None)
+            _record_ts_value(
+                "partial_snow_blend_energy_residual_uncorrected",
+                getattr(_soil_temperature_result, "partial_snow_blend_energy_residual_uncorrected", None),
+            )
+            _record_ts_value(
+                "partial_snow_blend_energy_residual_corrected",
+                getattr(_soil_temperature_result, "partial_snow_blend_energy_residual_corrected", None),
+            )
+            _record_ts_value(
+                "partial_snow_blend_water_residual",
+                getattr(_soil_temperature_result, "partial_snow_blend_water_residual", None),
+            )
             _record_ts_value("forc_t", tbot)
             _record_ts_value("forc_pbot", blended["diag_forc_pbot"])
             _record_ts_value("forc_swrad", fsds)
@@ -8928,6 +10513,17 @@ def _run_regional_benchmark(
             _imelt = _soil_result_from(last_result, "imelt")
             _soil_melt_profile = _soil_result_from(last_result, "qflx_soil_melt_profile")
             _soil_freeze_profile = _soil_result_from(last_result, "qflx_soil_freeze_profile")
+            _snow_melt_profile = _soil_result_from(last_result, "qflx_snow_melt_profile")
+            _snow_freeze_profile = _soil_result_from(last_result, "qflx_snow_freeze_profile")
+            for _snow_lev in range(MAX_SNOW_LAYERS):
+                _record_ts_value(
+                    f"qflx_snow_melt_lev{_snow_lev + 1}",
+                    None if _snow_melt_profile is None else _snow_melt_profile[..., _snow_lev],
+                )
+                _record_ts_value(
+                    f"qflx_snow_freeze_lev{_snow_lev + 1}",
+                    None if _snow_freeze_profile is None else _snow_freeze_profile[..., _snow_lev],
+                )
             for _soil_lev in range(soil_profile_nlev_ts):
                 _record_ts_value(
                     f"imelt_lev{_soil_lev + 1}",
@@ -9457,6 +11053,54 @@ def _run_regional_benchmark(
                 f"(first {int(args.regional_soil_temp_override_nlev)} level(s)) "
                 f"in {time.perf_counter() - t_override_start:.2f}s"
             )
+        ground_temperature_override = None
+        if args.regional_ground_temp_override_elm_history is not None:
+            n1h_override = (
+                int(met_cpu.shape[0]) - 2 * int(met_padding_steps)
+            ) * int(met_input_step_hours)
+            if args.regional_max_hours is not None:
+                n1h_override = min(n1h_override, int(args.regional_max_hours))
+            t_override_start = time.perf_counter()
+            ground_temperature_override = _load_elm_history_scalar_hourly_override(
+                args.regional_ground_temp_override_elm_history,
+                var_name="TG",
+                year=year,
+                month=month,
+                ncell=ncell,
+                n1h=n1h_override,
+                calendar=run_calendar,
+            )
+            print(
+                f"  {year}-{month:02d}:  loaded ELM TG feature override "
+                f"{tuple(ground_temperature_override.shape)} "
+                f"in {time.perf_counter() - t_override_start:.2f}s"
+            )
+        soil_liquid_override = None
+        soil_ice_override = None
+        if args.regional_soil_moisture_override_elm_history is not None:
+            n1h_override = (
+                int(met_cpu.shape[0]) - 2 * int(met_padding_steps)
+            ) * int(met_input_step_hours)
+            if args.regional_max_hours is not None:
+                n1h_override = min(n1h_override, int(args.regional_max_hours))
+            t_override_start = time.perf_counter()
+            soil_liquid_override, soil_ice_override = (
+                _load_elm_history_soil_moisture_override(
+                    args.regional_soil_moisture_override_elm_history,
+                    year=year,
+                    month=month,
+                    ncell=ncell,
+                    nlev=int(args.regional_soil_moisture_override_nlev),
+                    n1h=n1h_override,
+                    calendar=run_calendar,
+                )
+            )
+            print(
+                f"  {year}-{month:02d}:  loaded ELM SOILLIQ/SOILICE override "
+                f"{tuple(soil_liquid_override.shape)} "
+                f"(first {int(args.regional_soil_moisture_override_nlev)} level(s)) "
+                f"in {time.perf_counter() - t_override_start:.2f}s"
+            )
         ground_heat_flux_override = None
         if args.regional_ground_heat_override_elm_history is not None:
             n1h_override = (
@@ -9526,6 +11170,7 @@ def _run_regional_benchmark(
             soil_temperature_backend=args.soil_temperature_backend,
             snow_model_enabled=snow_model_enabled,
             snow_scalar_only=args.snow_scalar_only,
+            blend_partial_snow_soil_temperature=args.blend_partial_snow_soil_temperature,
             co2_ppm=co2_ppm_this_month,
             initial_state=state,
             precomputed=precomputed_cpu,
@@ -9576,9 +11221,11 @@ def _run_regional_benchmark(
             temperature_max_k=args.regional_temperature_max_k,
             photosynthesis_max=args.regional_photosynthesis_max,
             thermal_target_z_clamp=args.regional_thermal_target_z_clamp,
+            soil_energy_sabg_source=args.soil_energy_sabg_source,
             physics_step_hours=args.regional_physics_step_hours,
             universal_mlp_batch=args.universal,
             sparse_universal_mlp_batch=args.regional_sparse_pft_batch,
+            sparse_individual_feature_assembly=args.regional_sparse_individual_features,
             neutral_patch0_flnr=neutral_patch0_flnr,
             regional_lai_scale=args.regional_lai_scale,
             regional_sai_scale=args.regional_sai_scale,
@@ -9591,6 +11238,9 @@ def _run_regional_benchmark(
             regional_trait_relative_sd=args.regional_trait_relative_sd,
             regional_trait_feature_names=tuple(args.regional_trait_feature),
             soil_temperature_override=soil_temperature_override,
+            ground_temperature_override=ground_temperature_override,
+            soil_liquid_override=soil_liquid_override,
+            soil_ice_override=soil_ice_override,
             ground_heat_flux_override=ground_heat_flux_override,
             ground_heat_flux_override_targets=tuple(args.regional_ground_heat_override_targets),
             zwt_override=zwt_override,
@@ -9630,6 +11280,11 @@ def _run_regional_benchmark(
                 f"    universal fast feature steps: "
                 f"{int(timing.get('universal_fast_steps', 0))}/{n1h}"
             )
+        print(
+            "    feature cache refreshes: "
+            f"state={int(timing.get('state_feature_refreshes', n1h))}/{n1h}  "
+            f"vegetation={int(timing.get('vegetation_feature_refreshes', n1h))}/{n1h}"
+        )
         if sanity:
             print("    sanity: " + "  ".join(f"{k}={v:.4e}" for k, v in sanity.items()))
         if _prof:
@@ -9797,6 +11452,7 @@ def _run_regional_benchmark(
             plot_diag_maps = _filter_regional_plot_diag_maps(
                 diag_maps,
                 args.regional_plot_variable,
+                monthly_diag_maps=monthly_diag_maps,
             )
             # Accumulate monthly diagnostic maps.
             for key, arr in plot_diag_maps.items():
@@ -9960,6 +11616,22 @@ def _run_regional_benchmark(
 def main() -> None:
     args = parse_args()
     device = select_device(args.device)
+
+    if not args.disable_snow_model and args.snow_grain_aging:
+        snicar_path = _resolve_snicar_aging_file(
+            args.snicar_aging_file,
+            getattr(args, "clm_params", None),
+        )
+        if snicar_path is None or not snicar_path.is_file():
+            requested = "auto-discovery" if args.snicar_aging_file is None else str(args.snicar_aging_file)
+            raise SystemExit(
+                "Snow grain aging is enabled, but the SNICAR lookup table was not found "
+                f"({requested}). Supply --snicar-aging-file or use --no-snow-grain-aging."
+            )
+        load_snicar_aging_tables(snicar_path)
+        if not snicar_aging_tables_loaded():
+            raise SystemExit(f"Failed to load SNICAR grain-aging table: {snicar_path}")
+        print(f"  SNICAR snow grain aging: {snicar_path}")
 
     def _dtype_from_name(name: str) -> "torch.dtype":
         if name == "float32":

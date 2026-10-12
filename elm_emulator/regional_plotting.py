@@ -168,6 +168,16 @@ def _plot_diag_maps(
             "units": "m² m⁻²",
             "cmap": "Greens",
         },
+        "carbon_totvegc": {
+            "title": "Mean Total Vegetation Carbon",
+            "units": "gC m⁻²",
+            "cmap": "YlGn",
+        },
+        "carbon_totsomc": {
+            "title": "Mean Total Soil Organic Matter Carbon",
+            "units": "gC m⁻²",
+            "cmap": "YlOrBr",
+        },
         "t_soil_mean": {
             "title": "Mean Top-Layer Soil Temperature",
             "units": "K",
@@ -308,6 +318,13 @@ def _plot_diag_maps(
     }
 
     for key, arr in diag.items():
+        arr = np.asarray(arr)
+        if arr.ndim != 1 or arr.shape[0] != grid_row.size:
+            print(
+                f"  skipping non-scalar regional map {key!r}: "
+                f"shape={arr.shape}, expected ({grid_row.size},)"
+            )
+            continue
         arr = arr / n_months
         if key.startswith("mlp_ood_abs_z_"):
             feature_name = key[len("mlp_ood_abs_z_"):]
@@ -375,9 +392,32 @@ def _plot_diag_maps(
 def _filter_regional_plot_diag_maps(
     diag_maps: dict[str, np.ndarray],
     plot_variables: list[str] | tuple[str, ...] | None,
+    *,
+    monthly_diag_maps: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
-    """Return only requested regional map variables, preserving insertion order."""
-    if not plot_variables:
-        return dict(diag_maps)
-    wanted = {str(name) for name in plot_variables}
-    return {key: value for key, value in diag_maps.items() if key in wanted}
+    """Return requested scalar cell maps, preserving insertion order.
+
+    Regional diagnostics also contain profile arrays such as ``elm_h0_TSOI``
+    and nested hourly/daily output dictionaries.  Those belong in NetCDF
+    output, not in the scalar map renderer.
+    """
+    wanted = None if not plot_variables else {str(name) for name in plot_variables}
+    selected: dict[str, np.ndarray] = {}
+
+    def _select(source: dict[str, np.ndarray], *, monthly: bool) -> None:
+        for key, value in source.items():
+            if wanted is not None and key not in wanted:
+                continue
+            if isinstance(value, dict):
+                continue
+            arr = np.asarray(value)
+            if monthly and arr.ndim == 2 and arr.shape[0] == 1:
+                arr = arr[0]
+            if arr.ndim != 1:
+                continue
+            selected[key] = arr
+
+    _select(diag_maps, monthly=False)
+    if monthly_diag_maps:
+        _select(monthly_diag_maps, monthly=True)
+    return selected

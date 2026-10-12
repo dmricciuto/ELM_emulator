@@ -58,6 +58,7 @@ class SoilWaterCoreParameters:
     h2osfc_thresh: torch.Tensor | None = None
     pc: torch.Tensor | None = None
     topo_slope: torch.Tensor | None = None
+    rsub_top_globalmax: torch.Tensor | None = None
 
 
 @dataclass
@@ -80,6 +81,7 @@ class SoilHydrologyTorchResult:
     h2osfc: torch.Tensor
     qflx_surf: torch.Tensor
     qflx_infl: torch.Tensor
+    qflx_soil_evap: torch.Tensor
     qflx_h2osfc_surf: torch.Tensor
     qflx_h2osfc_drain: torch.Tensor
     qflx_infl_excess: torch.Tensor
@@ -431,6 +433,7 @@ def infiltration_torch(
     return {
         "h2osfc": h2osfc_new,
         "qflx_infl": qflx_infl,
+        "qflx_soil_evap": qflx_soil_evap,
         "qflx_h2osfc_surf": qflx_h2osfc_surf,
         "qflx_h2osfc_drain": qflx_h2osfc_drain,
         "qflx_infl_excess": qflx_infl_excess,
@@ -822,19 +825,41 @@ def hydrology_no_drainage_torch(
     # rsub_top: exponential topographic baseflow — mirrors elm_hydrology.py's
     # drainage().  Removes min(rsub_top_mm, total_available) from the column,
     # draining layers bottom-to-top (loop over nlev ≤ 15 iterations).
-    # rsub_top_max is in mm/s, matching the numpy drainage path:
-    #   min(10.0 * sin(slope_deg), 5.5e-3)
-    rsub_top_globalmax = 5.5e-3
+    # origflag=0: native reads the global cap from clm_params.nc and uses
+    # 10 mm/s when it is absent.
+    rsub_top_globalmax = _expand_vec(
+        params.rsub_top_globalmax
+        if params.rsub_top_globalmax is not None
+        else torch.full_like(state.zwt, 10.0),
+        batch_shape,
+        device,
+        dtype,
+    )
     if params.topo_slope is not None:
         topo_slope_f = _expand_vec(params.topo_slope, batch_shape, device, dtype)
         rsub_top_max = torch.minimum(
             10.0 * torch.sin(torch.deg2rad(topo_slope_f)),
-            torch.full_like(topo_slope_f, rsub_top_globalmax),
+            rsub_top_globalmax,
         )
     else:
         rsub_top_max = torch.zeros((h2osoi_liq.shape[0],), device=device, dtype=dtype)
     zwt_flat, _ = _flatten_vec(zwt_after_qcharge)
-    rsub_top_rate = rsub_top_max * torch.exp(-fdrain * zwt_flat)
+    zi_full = _expand_last(params.zi, batch_shape, device, dtype)
+    icefrac = torch.clamp(
+        torch.minimum(watsat, h2osoi_ice / (dz * DENICE))
+        / torch.clamp(watsat, min=1.0e-12),
+        max=1.0,
+    )
+    jwt = (zwt_flat[:, None] > zi_full).long().sum(dim=1)
+    ice_start = torch.clamp(jwt - 1, min=0)
+    active_ice = torch.arange(h2osoi_liq.shape[-1], device=device)[None, :] >= ice_start[:, None]
+    ice_dz = torch.where(active_ice, dz, torch.zeros_like(dz))
+    imped = torch.pow(
+        torch.full_like(zwt_flat, 10.0),
+        -E_ICE * torch.sum(icefrac * ice_dz, dim=1)
+        / torch.clamp(torch.sum(ice_dz, dim=1), min=1.0e-12),
+    )
+    rsub_top_rate = imped * rsub_top_max * torch.exp(-fdrain * zwt_flat)
     # Vectorized bottom-to-top drain: distribute rsub_top budget across
     # layers starting from the bottom, without a sequential Python loop.
     available = torch.clamp(hliq_flat - 1.0e-8, min=0.0)          # (nbatch, nlev)
@@ -883,6 +908,7 @@ def hydrology_no_drainage_torch(
         h2osfc=h2osfc_out,
         qflx_surf=_restore_vec(qflx_surf, batch_shape),
         qflx_infl=_restore_vec(infil["qflx_infl"], batch_shape),
+        qflx_soil_evap=_restore_vec(infil["qflx_soil_evap"], batch_shape),
         qflx_h2osfc_surf=_restore_vec(infil["qflx_h2osfc_surf"], batch_shape),
         qflx_h2osfc_drain=_restore_vec(infil["qflx_h2osfc_drain"], batch_shape),
         qflx_infl_excess=_restore_vec(infil["qflx_infl_excess"], batch_shape),
@@ -978,7 +1004,10 @@ def water_table_torch(
     zwt_f = zwt_f - torch.where(rising & ~below & (qtot_r > 0.0), qtot_r / 1000.0 / rous_last, torch.zeros_like(qtot_r))
 
     for j_abs in range(nlev):               # shallow → deep scan for falling
-        active = falling & ~below & (jwt < j_abs) & (qtot_f < 0.0)
+        # Native's 1-based loop is j=jwt+1,nlevbed.  With zero-based layer
+        # indices, the first layer is therefore j_abs == jwt (the layer that
+        # currently contains the water table), not jwt+1.
+        active = falling & ~below & (jwt <= j_abs) & (qtot_f < 0.0)
         sy_j   = wsat[:, j_abs] * (1.0 - (1.0 + 1.0e3 * zwt_f / torch.clamp(ssat[:, j_abs], min=1.0e-12)) ** (-1.0 / bswf[:, j_abs]))
         sy_j   = torch.clamp(sy_j, min=0.02)
         layer_cap = -torch.clamp(sy_j * (zif[:, j_abs] - zwt_f) * 1.0e3, min=0.0)  # negative
@@ -1007,6 +1036,7 @@ def drainage_torch(
     fdrain: torch.Tensor | None,
     topo_slope: torch.Tensor | None,
     dt: float,
+    rsub_top_globalmax: torch.Tensor | None = None,
     wa: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Torch port of the narrowed default drainage path."""
@@ -1043,9 +1073,22 @@ def drainage_torch(
 
     topo_slope_f = (_expand_vec(topo_slope, batch_shape, device, dtype)
                     if topo_slope is not None else torch.zeros_like(zwt_f))
-    rsub_top_globalmax = torch.full_like(zwt_f, 5.5e-3)
-    rsub_top_max = torch.minimum(10.0 * torch.sin(torch.deg2rad(topo_slope_f)), rsub_top_globalmax)
-    rsub_top = rsub_top_max * torch.exp(-fdrain_f * zwt_f)
+    globalmax_f = (
+        _expand_vec(rsub_top_globalmax, batch_shape, device, dtype)
+        if rsub_top_globalmax is not None else torch.full_like(zwt_f, 10.0)
+    )
+    rsub_top_max = torch.minimum(10.0 * torch.sin(torch.deg2rad(topo_slope_f)), globalmax_f)
+    vol_ice = torch.minimum(watsatf, hice / (dzf * DENICE))
+    icefrac = torch.clamp(vol_ice / torch.clamp(watsatf, min=1.0e-12), max=1.0)
+    ice_start = torch.clamp(jwt - 1, min=0)
+    active_ice = torch.arange(nlev, device=device)[None, :] >= ice_start[:, None]
+    ice_dz = torch.where(active_ice, dzmm, torch.zeros_like(dzmm))
+    imped = torch.pow(
+        torch.full_like(zwt_f, 10.0),
+        -E_ICE * torch.sum(icefrac * ice_dz, dim=1)
+        / torch.clamp(torch.sum(ice_dz, dim=1), min=1.0e-12),
+    )
+    rsub_top = imped * rsub_top_max * torch.exp(-fdrain_f * zwt_f)
     rsub_top_tot = -rsub_top * dt
 
     rous = watsatf[:, -1] * (1.0 - (1.0 + 1.0e3 * zwt_f / sucsatf[:, -1]) ** (-1.0 / bswf[:, -1]))
@@ -1054,14 +1097,18 @@ def drainage_torch(
     # rsub_top_tot is always <= 0 (drainage), so this is the falling-table case.
     # Vectorized scan over nlev levels: drain each layer from jwt+1 downward.
     below_col = zwt_f > zif[:, -1]
-    bottom_layer = (jwt == nlev - 1) & ~below_col
-    direct_aquifer = below_col | bottom_layer
+    # jwt == nlev-1 means the table is inside the bottom soil layer.  Native
+    # ELM only takes the direct-aquifer branch for jwt == nlev (strictly below
+    # the active soil column).
+    direct_aquifer = below_col
     wa_f   = wa_f   + torch.where(direct_aquifer, rsub_top_tot,             torch.zeros_like(rsub_top_tot))
     zwt_f  = zwt_f  - torch.where(direct_aquifer, rsub_top_tot / 1000.0 / rous, torch.zeros_like(rsub_top_tot))
     rem    = torch.where(~direct_aquifer, rsub_top_tot, torch.zeros_like(rsub_top_tot))  # <= 0
 
     for j_abs in range(nlev):
-        active = ~direct_aquifer & (jwt < j_abs) & (rem < 0.0)
+        # Match ELM Drainage's j=jwt+1,nlevbed loop after converting from its
+        # 1-based layer number to our zero-based index.
+        active = ~direct_aquifer & (jwt <= j_abs) & (rem < 0.0)
         sy_j   = watsatf[:, j_abs] * (1.0 - (1.0 + 1.0e3 * zwt_f / torch.clamp(sucsatf[:, j_abs], min=1.0e-12)) ** (-1.0 / bswf[:, j_abs]))
         sy_j   = torch.clamp(sy_j, min=0.02)
         layer_cap = -torch.clamp(sy_j * (zif[:, j_abs] - zwt_f) * 1.0e3, min=0.0)   # <= 0
@@ -1076,7 +1123,8 @@ def drainage_torch(
     # Residual that couldn't fit in soil column goes into aquifer
     wa_f  = wa_f  + torch.where(~direct_aquifer & (rem < 0.0), rem, torch.zeros_like(rem))
     zwt_f = zwt_f - torch.where(~direct_aquifer & (rem < 0.0), rem / 1000.0 / rous, torch.zeros_like(rem))
-    rsub_top = -(rsub_top_tot - rem) / dt
+    # Keep the full requested flux: native counts residual drainage supplied
+    # by the aquifer as drainage too.
 
     qflx_rsub_sat = torch.zeros_like(zwt_f)
     # Match the NumPy drainage path's bottom-to-top saturation-excess cascade.
@@ -1249,6 +1297,7 @@ def hydrology_torch(
             eff_porosity=eff_porosity,
             fdrain=params.fdrain,
             topo_slope=params.topo_slope,
+            rsub_top_globalmax=params.rsub_top_globalmax,
             dt=dt,
             wa=wa2,
         ),
@@ -1259,6 +1308,7 @@ def hydrology_torch(
         h2osfc=hsurf2,
         qflx_surf=_restore_vec(qflx_surf, batch_shape),
         qflx_infl=_restore_vec(infil["qflx_infl"], batch_shape),
+        qflx_soil_evap=_restore_vec(infil["qflx_soil_evap"], batch_shape),
         qflx_h2osfc_surf=_restore_vec(infil["qflx_h2osfc_surf"], batch_shape),
         qflx_h2osfc_drain=_restore_vec(infil["qflx_h2osfc_drain"], batch_shape),
         qflx_infl_excess=_restore_vec(infil["qflx_infl_excess"], batch_shape),

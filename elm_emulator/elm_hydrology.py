@@ -268,6 +268,9 @@ class HydrologyParameters:
     pc: np.ndarray
     rootfr: np.ndarray
     topo_slope: np.ndarray | None = None
+    # Native origflag=0 reads this from clm_params.nc and falls back to
+    # 10 mm/s when the variable is absent (pftvarcon.F90).
+    rsub_top_globalmax: np.ndarray | None = None
 
 
 @dataclass
@@ -433,6 +436,7 @@ class HydrologyResult:
     wa: Optional[np.ndarray]
     qflx_surf: np.ndarray
     qflx_infl: np.ndarray
+    qflx_soil_evap: np.ndarray
     qflx_h2osfc_surf: np.ndarray
     qflx_h2osfc_drain: np.ndarray
     qflx_infl_excess: np.ndarray
@@ -610,6 +614,7 @@ def infiltration(
 
     fluxes = {
         "qflx_infl": _restore_vec(qflx_infl, batch_shape),
+        "qflx_soil_evap": _restore_vec(qflx_soil_evap, batch_shape),
         "qflx_h2osfc_surf": _restore_vec(qflx_h2osfc_surf, batch_shape),
         "qflx_h2osfc_drain": _restore_vec(qflx_h2osfc_drain, batch_shape),
         "qflx_infl_excess": _restore_vec(qflx_infl_excess, batch_shape),
@@ -682,7 +687,10 @@ def water_table(
                 if qtot <= 0.0:
                     break
         else:
-            for j in range(jwt[row] + 1, nlev):
+            # ELM's 1-based loop is j=jwt+1,nlevbed.  ``jwt`` here is the
+            # number of interfaces above the table, so the equivalent
+            # zero-based first layer is exactly jwt, not jwt+1.
+            for j in range(jwt[row], nlev):
                 sy = watsat[row, j] * (1.0 - (1.0 + 1.0e3 * zwt[row] / sucsat[row, j]) ** (-1.0 / bsw[row, j]))
                 sy = max(sy, 0.02)
                 layer = max(qtot, -(sy * (zi[row, j] - zwt[row]) * 1.0e3))
@@ -766,9 +774,20 @@ def drainage(
     below_column = zwt > zi[:, -1]
 
     topo_slope = _broadcast_optional_vec(params.topo_slope, batch_shape, default=0.0)
-    rsub_top_globalmax = 5.5e-3
+    rsub_top_globalmax = _broadcast_optional_vec(
+        params.rsub_top_globalmax, batch_shape, default=10.0
+    )
     rsub_top_max = np.minimum(10.0 * np.sin(np.radians(topo_slope)), rsub_top_globalmax)
-    rsub_top = rsub_top_max * np.exp(-fdrain * zwt)
+    vol_ice = np.minimum(watsat, h2osoi_ice / (dz * DENICE))
+    icefrac = np.minimum(1.0, vol_ice / np.maximum(watsat, 1.0e-12))
+    # Fortran's 1-based do j=max(jwt,1),nlevbed starts at zero-based
+    # max(jwt-1,0).  Weight ice by layer thickness exactly as native does.
+    ice_start = np.maximum(jwt - 1, 0)
+    active_ice = np.arange(nlev)[None, :] >= ice_start[:, None]
+    dzsum = np.sum(np.where(active_ice, dzmm, 0.0), axis=1)
+    icefracsum = np.sum(np.where(active_ice, icefrac * dzmm, 0.0), axis=1)
+    imped = 10.0 ** (-E_ICE * icefracsum / np.maximum(dzsum, 1.0e-12))
+    rsub_top = imped * rsub_top_max * np.exp(-fdrain * zwt)
     rsub_top_tot = -rsub_top * dt
 
     rous = watsat[:, -1] * (1.0 - (1.0 + 1.0e3 * zwt / sucsat[:, -1]) ** (-1.0 / bsw[:, -1]))
@@ -782,12 +801,12 @@ def drainage(
             wa_f[row] += rsub_top_tot[row]
             zwt[row] -= rsub_top_tot[row] / 1000.0 / rous[row]
             continue
-        if jwt[row] == nlev - 1:
-            wa_f[row] = wa_f[row] + rsub_top_tot[row]
-            zwt[row] = zwt[row] - rsub_top_tot[row] / 1000.0 / rous[row]
         else:
             rem = rsub_top_tot[row]
-            for j in range(jwt[row] + 1, nlev):
+            # A table in the bottom soil layer is still in-column in native
+            # ELM.  Drain that current layer before routing any residual to
+            # the aquifer.
+            for j in range(jwt[row], nlev):
                 sy = watsat[row, j] * (1.0 - (1.0 + 1.0e3 * zwt[row] / sucsat[row, j]) ** (-1.0 / bsw[row, j]))
                 sy = max(sy, 0.02)
                 layer = max(rem, -(sy * (zi[row, j] - zwt[row]) * 1.0e3))
@@ -801,7 +820,8 @@ def drainage(
             if rem < 0.0:
                 wa_f[row] += rem
                 zwt[row] = zwt[row] - rem / 1000.0 / rous[row]
-            rsub_top[row] = -((rsub_top_tot[row] - rem) / dt)
+            # Native reports the full drainage flux even when the residual is
+            # supplied by the unconfined aquifer rather than soil layers.
 
     qflx_rsub_sat = np.zeros(nbatch, dtype=R8)
     # Saturation-excess redistribution: bottom-to-top, vectorized
@@ -1171,6 +1191,7 @@ def hydrology_no_drainage_step(
         wa=None,
         qflx_surf=qflx_surf,
         qflx_infl=infil["qflx_infl"],
+        qflx_soil_evap=infil["qflx_soil_evap"],
         qflx_h2osfc_surf=infil["qflx_h2osfc_surf"],
         qflx_h2osfc_drain=infil["qflx_h2osfc_drain"],
         qflx_infl_excess=infil["qflx_infl_excess"],
@@ -1234,6 +1255,7 @@ def hydrology_step(
         wa=drain["wa"],
         qflx_surf=qflx_surf,
         qflx_infl=infil["qflx_infl"],
+        qflx_soil_evap=infil["qflx_soil_evap"],
         qflx_h2osfc_surf=infil["qflx_h2osfc_surf"],
         qflx_h2osfc_drain=infil["qflx_h2osfc_drain"],
         qflx_infl_excess=infil["qflx_infl_excess"],

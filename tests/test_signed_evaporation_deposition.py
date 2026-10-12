@@ -163,4 +163,6 @@ def test_negative_soil_evaporation_enters_top_soil_boundary() -> None:
     dew_result = hydrology_no_drainage_step(state, params, dew, dt=3600.0)
 
     assert dew_result.qflx_infl[0] > zero_result.qflx_infl[0]
+    np.testing.assert_allclose(zero_result.qflx_soil_evap, [0.0])
+    np.testing.assert_allclose(dew_result.qflx_soil_evap, [-1.0e-6])
     assert dew_result.state.h2osoi_liq[0, 0] > zero_result.state.h2osoi_liq[0, 0]

@@ -18,11 +18,21 @@ from sklearn.metrics import r2_score
 
 from .btran_utils import compute_btran_and_root_fraction
 from .coupled_surface_hydrology_soiltemp import (
+    diagnostic_soil_surface_humidity,
     organic_fraction_from_surfdata,
     vapor_pressure_deficit_from_forcing,
 )
 from .elm_hydrology import SoilTextureProfile, elm_soil_grid, hydraulic_params_from_texture
 from .paths import DEFAULT_MODEL_DIR
+from .thermal_energy_closure import (
+    ENERGY_CLOSED_SOIL_TARGET_NAMES,
+    ENERGY_CLOSED_SURFACE_TARGET_NAMES,
+    derive_surface_thermal_boundaries_torch,
+    derive_soil_thermal_boundary_numpy,
+    derive_soil_thermal_boundary_torch,
+    has_energy_closed_soil_targets,
+    has_energy_closed_surface_targets,
+)
 
 try:
     import torch
@@ -47,6 +57,17 @@ SKIP_TARGET_NAMES = {
     "qflx_snwcp_ice",
     "qflx_snwcp_liq",
 }
+
+# With the primitive soil-energy contract, these two composite outputs are
+# reconstructed diagnostically and are no longer learned independently.
+ENERGY_CLOSED_REPLACED_TARGET_NAMES = {"hs_soil", "dhsdT"}
+ENERGY_CLOSED_FULL_REPLACED_TARGET_NAMES = ENERGY_CLOSED_REPLACED_TARGET_NAMES | {
+    "hs_top_snow",
+    "hs_h2osfc",
+}
+# Exact zero fractions can round-trip through float32 standardization as about
+# 1e-8. Treat sub-ppm surface fractions as inactive when selecting closure rows.
+ENERGY_CLOSURE_INACTIVE_FRACTION_TOL = 1.0e-6
 
 DROP_INPUT_PREFIXES = ("smp_l_lev", "rootfr_lev", "t_soisno_lev", "h2osoi_liqvol_lev", "eff_porosity_lev")
 KEEP_DROPPED_PREFIX_INPUT_NAMES = frozenset({
@@ -86,6 +107,9 @@ PHYSIOLOGY_PARAMETER_TARGET_NAMES = (
     "qflx_tran_veg",
 )
 NONNEGATIVE_TARGET_NAMES = {
+    "sabg_soil",
+    "sabg_snow_top",
+    "cgrnds",
     "cgrndl",
     "gh_canopy",
     "h2ocan",
@@ -96,6 +120,7 @@ NONNEGATIVE_TARGET_NAMES = {
     "rssha_patch",
     "psnsun_patch",
     "psnsha_patch",
+    "qflx_tran_veg",
 }
 SIGNED_EVAPORATION_TARGET_NAMES = {
     "qflx_evap_canopy",
@@ -437,6 +462,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--qsoil-high-lai-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Per-target loss multiplier for qflx_ev_soil samples at or above "
+            "--qsoil-high-lai-threshold. A value of 1 disables this weighting."
+        ),
+    )
+    parser.add_argument(
+        "--qsoil-high-lai-threshold",
+        type=float,
+        default=3.0,
+        help="elai_patch threshold for --qsoil-high-lai-weight, in m2 m-2.",
+    )
+    parser.add_argument(
         "--hs-soil-weight",
         type=float,
         default=1.5,
@@ -453,6 +493,31 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Extra sample-weight multiplier driven by |dhsdT| magnitude.",
+    )
+    parser.add_argument(
+        "--energy-closure-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Extra normalized loss on the soil heat flux reconstructed from "
+            "primitive thermal targets. Applied automatically when the new "
+            "energy-closed target contract is present."
+        ),
+    )
+    parser.add_argument(
+        "--energy-closure-bias-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Penalty on the signed minibatch-mean reconstructed soil heat-flux "
+            "error; suppresses small persistent flux biases that integrate into TSOI drift."
+        ),
+    )
+    parser.add_argument(
+        "--energy-derivative-weight",
+        type=float,
+        default=0.25,
+        help="Extra normalized loss on energy-closed dhsdT reconstructed from cgrnds/cgrndl.",
     )
     parser.add_argument(
         "--no-nighttime-psn-mask",
@@ -1028,19 +1093,39 @@ def _append_derived_forcing_input_features(
 ) -> tuple[np.ndarray, list[str]]:
     """Append locally derived forcing features that are reproducible in replay."""
     fmap = {name: idx for idx, name in enumerate(feature_names)}
-    if "forc_vpd" in fmap:
+    appended_columns: list[np.ndarray] = []
+    appended_names: list[str] = []
+    if "forc_vpd" not in fmap:
+        required = ("forc_t", "forc_q", "forc_pbot")
+        missing = [name for name in required if name not in fmap]
+        if missing:
+            raise KeyError(f"Cannot derive forc_vpd without feature columns: {', '.join(missing)}")
+        appended_columns.append(
+            vapor_pressure_deficit_from_forcing(
+                features[:, fmap["forc_t"]],
+                features[:, fmap["forc_q"]],
+                features[:, fmap["forc_pbot"]],
+            )[:, None]
+        )
+        appended_names.append("forc_vpd")
+    if "qg_soil_diag" not in fmap:
+        required = ("t_soisno_lev1", "smp_l_lev1", "forc_pbot", "forc_q")
+        missing = [name for name in required if name not in fmap]
+        if missing:
+            raise KeyError(f"Cannot derive qg_soil_diag without feature columns: {', '.join(missing)}")
+        appended_columns.append(
+            diagnostic_soil_surface_humidity(
+                features[:, fmap["t_soisno_lev1"]],
+                features[:, fmap["smp_l_lev1"]],
+                features[:, fmap["forc_pbot"]],
+                features[:, fmap["forc_q"]],
+            )[:, None]
+        )
+        appended_names.append("qg_soil_diag")
+    if not appended_columns:
         return features, feature_names
-    required = ("forc_t", "forc_q", "forc_pbot")
-    missing = [name for name in required if name not in fmap]
-    if missing:
-        raise KeyError(f"Cannot derive forc_vpd without feature columns: {', '.join(missing)}")
-    forc_vpd = vapor_pressure_deficit_from_forcing(
-        features[:, fmap["forc_t"]],
-        features[:, fmap["forc_q"]],
-        features[:, fmap["forc_pbot"]],
-    )
-    print("  [features] appending forcing-derived input feature: forc_vpd")
-    return np.concatenate([features, forc_vpd[:, None]], axis=1), feature_names + ["forc_vpd"]
+    print(f"  [features] appending forcing/state-derived input features: {appended_names}")
+    return np.concatenate([features, *appended_columns], axis=1), feature_names + appended_names
 
 
 def _drop_feature_prefixes(
@@ -1164,10 +1249,29 @@ def load_training_data(
             ),
         }
 
+    energy_closed_thermal_targets = has_energy_closed_soil_targets(names["target_names"])
+    energy_closed_surface_targets = has_energy_closed_surface_targets(names["target_names"])
+    skip_target_names = set(SKIP_TARGET_NAMES)
+    if energy_closed_thermal_targets:
+        replaced = (
+            ENERGY_CLOSED_FULL_REPLACED_TARGET_NAMES
+            if energy_closed_surface_targets
+            else ENERGY_CLOSED_REPLACED_TARGET_NAMES
+        )
+        skip_target_names.update(replaced)
+        print(
+            "  [targets] primitive surface-energy contract detected; deriving "
+            + (
+                "hs_soil/hs_top_snow/hs_h2osfc/dhsdT"
+                if energy_closed_surface_targets
+                else "hs_soil/dhsdT"
+            )
+            + " instead of learning them independently."
+        )
     keep_target_indices = [
-        idx for idx, name in enumerate(names["target_names"]) if name not in SKIP_TARGET_NAMES
+        idx for idx, name in enumerate(names["target_names"]) if name not in skip_target_names
     ]
-    dropped_target_names = [name for name in names["target_names"] if name in SKIP_TARGET_NAMES]
+    dropped_target_names = [name for name in names["target_names"] if name in skip_target_names]
     targets = targets[:, keep_target_indices]
     names["target_names"] = [names["target_names"][idx] for idx in keep_target_indices]
     if features.shape[1] == len(names["feature_names"]) + 1 and "btran" not in names["feature_names"]:
@@ -1237,6 +1341,8 @@ def load_training_data(
     names["input_names"] = names["feature_names"]
     names["dropped_target_names"] = dropped_target_names
     names["dropped_input_names"] = dropped_input_names
+    names["energy_closed_thermal_targets"] = energy_closed_thermal_targets
+    names["energy_closed_surface_targets"] = energy_closed_surface_targets
     return patch_index, cell_index, features, targets, time_info, names
 
 
@@ -1783,6 +1889,10 @@ def compute_target_loss_weights(
     psn_low_value_threshold: float,
     negative_evap_weight: float = 1.0,
     negative_evap_threshold: float = 0.0,
+    x: np.ndarray | None = None,
+    input_names: list[str] | None = None,
+    qsoil_high_lai_weight: float = 1.0,
+    qsoil_high_lai_threshold: float = 3.0,
 ) -> np.ndarray:
     weights = np.ones(y.shape, dtype=np.float64)
     if psn_low_value_weight > 1.0:
@@ -1800,6 +1910,20 @@ def compute_target_loss_weights(
             idx = target_names.index(target_name)
             dew_valid = valid_mask[:, idx] & (np.asarray(y[:, idx], dtype=np.float64) < -threshold)
             weights[dew_valid, idx] *= negative_evap_weight
+    if qsoil_high_lai_weight > 1.0 and "qflx_ev_soil" in target_names:
+        if x is None or input_names is None or "elai_patch" not in input_names:
+            raise ValueError(
+                "High-LAI qflx_ev_soil weighting requires x and the elai_patch input feature"
+            )
+        qsoil_idx = target_names.index("qflx_ev_soil")
+        lai_idx = input_names.index("elai_patch")
+        elai = np.asarray(x[:, lai_idx], dtype=np.float64)
+        high_lai_valid = (
+            valid_mask[:, qsoil_idx]
+            & np.isfinite(elai)
+            & (elai >= float(qsoil_high_lai_threshold))
+        )
+        weights[high_lai_valid, qsoil_idx] *= qsoil_high_lai_weight
     return weights
 
 
@@ -2100,6 +2224,153 @@ def _predict_scaled_tensor(
     return torch.cat(pred_chunks, dim=0).numpy()
 
 
+def _energy_closure_reference_numpy(
+    x: np.ndarray,
+    y: np.ndarray,
+    y_valid: np.ndarray,
+    input_names: list[str],
+    target_names: list[str],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return snow-free reference hs/dhsdT and its valid-row mask."""
+
+    required_inputs = {"forc_lwrad", "frac_veg_nosno_patch", "t_soisno_lev1", "t_grnd"}
+    if not has_energy_closed_soil_targets(target_names) or not required_inputs.issubset(input_names):
+        return None
+    imap = {name: idx for idx, name in enumerate(input_names)}
+    tmap = {name: idx for idx, name in enumerate(target_names)}
+    target_map = {name: y[:, tmap[name]] for name in ENERGY_CLOSED_SOIL_TARGET_NAMES}
+    hs, derivative, _ = derive_soil_thermal_boundary_numpy(
+        target_map,
+        forc_lwrad=x[:, imap["forc_lwrad"]],
+        frac_veg_nosno=x[:, imap["frac_veg_nosno_patch"]],
+        t_soil_top=x[:, imap["t_soisno_lev1"]],
+        t_grnd=x[:, imap["t_grnd"]],
+        enforce_nonnegative_conductance=False,
+    )
+    valid = np.isfinite(hs) & np.isfinite(derivative)
+    valid &= np.all(
+        y_valid[:, [tmap[name] for name in ENERGY_CLOSED_SOIL_TARGET_NAMES]],
+        axis=1,
+    )
+    if "frac_sno" in imap:
+        valid &= x[:, imap["frac_sno"]] <= ENERGY_CLOSURE_INACTIVE_FRACTION_TOL
+    if "frac_h2osfc" in imap:
+        valid &= x[:, imap["frac_h2osfc"]] <= ENERGY_CLOSURE_INACTIVE_FRACTION_TOL
+    return hs, derivative, valid
+
+
+def _energy_closure_loss_torch(
+    pred_scaled: torch.Tensor,
+    true_scaled: torch.Tensor,
+    true_mask: torch.Tensor,
+    x_scaled: torch.Tensor,
+    *,
+    input_names: list[str],
+    target_names: list[str],
+    x_mean: torch.Tensor,
+    x_std: torch.Tensor,
+    y_mean: torch.Tensor,
+    y_std: torch.Tensor,
+    heat_scale: float,
+    derivative_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return pointwise heat, signed-mean heat, and derivative closure losses."""
+
+    imap = {name: idx for idx, name in enumerate(input_names)}
+    tmap = {name: idx for idx, name in enumerate(target_names)}
+    x_phys = x_scaled * x_std + x_mean
+    pred_phys = pred_scaled * y_std + y_mean
+    true_phys = true_scaled * y_std + y_mean
+
+    full_surface = has_energy_closed_surface_targets(target_names) and {
+        "t_snow_top",
+        "t_h2osfc",
+    }.issubset(imap)
+    primitive_names = (
+        ENERGY_CLOSED_SURFACE_TARGET_NAMES
+        if full_surface
+        else ENERGY_CLOSED_SOIL_TARGET_NAMES
+    )
+
+    def _derive(values: torch.Tensor):
+        target_map = {name: values[:, tmap[name]] for name in primitive_names}
+        if full_surface:
+            return derive_surface_thermal_boundaries_torch(
+                target_map,
+                forc_lwrad=x_phys[:, imap["forc_lwrad"]],
+                frac_veg_nosno=x_phys[:, imap["frac_veg_nosno_patch"]],
+                t_soil_top=x_phys[:, imap["t_soisno_lev1"]],
+                t_snow_top=x_phys[:, imap["t_snow_top"]],
+                t_h2osfc=x_phys[:, imap["t_h2osfc"]],
+                t_grnd=x_phys[:, imap["t_grnd"]],
+                enforce_nonnegative_conductance=False,
+            )[:4]
+        return derive_soil_thermal_boundary_torch(
+            target_map,
+            forc_lwrad=x_phys[:, imap["forc_lwrad"]],
+            frac_veg_nosno=x_phys[:, imap["frac_veg_nosno_patch"]],
+            t_soil_top=x_phys[:, imap["t_soisno_lev1"]],
+            t_grnd=x_phys[:, imap["t_grnd"]],
+            enforce_nonnegative_conductance=False,
+        )[:2]
+
+    pred_boundaries = _derive(pred_phys)
+    true_boundaries = _derive(true_phys)
+    hs_pred, derivative_pred = pred_boundaries[0], pred_boundaries[-1]
+    hs_true, derivative_true = true_boundaries[0], true_boundaries[-1]
+    valid = torch.isfinite(derivative_true)
+    primitive_cols = torch.as_tensor(
+        [tmap[name] for name in primitive_names],
+        device=true_mask.device,
+        dtype=torch.long,
+    )
+    valid &= torch.all(true_mask.index_select(1, primitive_cols) > 0.5, dim=1)
+    if not full_surface and "frac_sno" in imap:
+        valid &= (
+            x_phys[:, imap["frac_sno"]]
+            <= ENERGY_CLOSURE_INACTIVE_FRACTION_TOL
+        )
+    if not full_surface and "frac_h2osfc" in imap:
+        valid &= (
+            x_phys[:, imap["frac_h2osfc"]]
+            <= ENERGY_CLOSURE_INACTIVE_FRACTION_TOL
+        )
+    if not torch.any(valid):
+        zero = pred_scaled.sum() * 0.0
+        return zero, zero, zero
+    if full_surface:
+        frac_snow = torch.clamp(x_phys[:, imap["frac_sno"]], min=0.0, max=1.0)
+        frac_water = torch.clamp(x_phys[:, imap["frac_h2osfc"]], min=0.0, max=1.0)
+        surface_fractions = (
+            torch.clamp(1.0 - frac_snow - frac_water, min=0.0),
+            frac_snow,
+            frac_water,
+        )
+        heat_errors = []
+        for pred_heat, true_heat, fraction in zip(
+            pred_boundaries[:3], true_boundaries[:3], surface_fractions
+        ):
+            active = valid & torch.isfinite(true_heat) & (
+                fraction > ENERGY_CLOSURE_INACTIVE_FRACTION_TOL
+            )
+            if torch.any(active):
+                heat_errors.append(
+                    (pred_heat[active] - true_heat[active])
+                    / max(float(heat_scale), 1.0e-6)
+                )
+        heat_error = torch.cat(heat_errors) if heat_errors else pred_scaled.sum().reshape(1) * 0.0
+    else:
+        heat_error = (hs_pred[valid] - hs_true[valid]) / max(float(heat_scale), 1.0e-6)
+    derivative_error = (
+        derivative_pred[valid] - derivative_true[valid]
+    ) / max(float(derivative_scale), 1.0e-6)
+    return (
+        torch.mean(heat_error.square()),
+        torch.mean(heat_error).square(),
+        torch.mean(derivative_error.square()),
+    )
+
+
 def train_patch_model(
     patch_data: PatchDataset,
     target_names: list[str],
@@ -2166,6 +2437,34 @@ def train_patch_model(
             f"{dropped_constant_input_names}"
         )
 
+    closure_reference = _energy_closure_reference_numpy(
+        x_train,
+        y_train,
+        y_train_valid,
+        input_names,
+        target_names,
+    )
+    energy_closure_enabled = closure_reference is not None
+    closure_heat_scale = 1.0
+    closure_derivative_scale = 1.0
+    if closure_reference is not None:
+        closure_hs_ref, closure_derivative_ref, closure_valid = closure_reference
+        if np.any(closure_valid):
+            closure_heat_scale = max(float(np.std(closure_hs_ref[closure_valid])), 1.0)
+            closure_derivative_scale = max(float(np.std(closure_derivative_ref[closure_valid])), 0.1)
+            print(
+                f"  [energy closure] patch {patch_data.patch_index}: snow-free scales "
+                f"hs={closure_heat_scale:.4g} W m-2, dhsdT={closure_derivative_scale:.4g} W m-2 K-1"
+            )
+        else:
+            energy_closure_enabled = False
+            print(f"  [energy closure] patch {patch_data.patch_index}: no valid snow-free rows; disabled")
+    elif has_energy_closed_soil_targets(target_names):
+        print(
+            f"  [energy closure] patch {patch_data.patch_index}: required temperature/radiation "
+            "inputs were dropped; consistency loss disabled"
+        )
+
     x_train_scaled, x_val_scaled, x_mean, x_std = standardize_train_validation(x_train, x_val)
     x_holdout_scaled = (x_holdout - x_mean) / x_std if x_holdout is not None else None
     y_train_scaled, y_val_scaled, y_mean, y_std = standardize_targets_with_mask(
@@ -2205,6 +2504,10 @@ def train_patch_model(
         args.psn_low_value_threshold,
         args.negative_evap_weight,
         args.negative_evap_threshold,
+        x_train,
+        input_names,
+        args.qsoil_high_lai_weight,
+        args.qsoil_high_lai_threshold,
     )
     val_target_loss_weights = compute_target_loss_weights(
         y_val,
@@ -2214,6 +2517,10 @@ def train_patch_model(
         args.psn_low_value_threshold,
         args.negative_evap_weight,
         args.negative_evap_threshold,
+        x_val,
+        input_names,
+        args.qsoil_high_lai_weight,
+        args.qsoil_high_lai_threshold,
     )
 
     x_train_tensor = torch.tensor(x_train_scaled, dtype=torch.float32, device=device)
@@ -2231,6 +2538,10 @@ def train_patch_model(
         if x_holdout_scaled is not None
         else None
     )
+    x_mean_tensor = torch.tensor(x_mean.astype(np.float32), device=device)
+    x_std_tensor = torch.tensor(x_std.astype(np.float32), device=device)
+    y_mean_tensor = torch.tensor(y_mean.astype(np.float32), device=device)
+    y_std_tensor = torch.tensor(y_std.astype(np.float32), device=device)
 
     pft_embedding_categories: tuple[int, ...] = ()
     pft_embedding_input_index = None
@@ -2287,6 +2598,7 @@ def train_patch_model(
     epochs_since_improvement = 0
     history_train_loss: list[float] = []
     history_val_loss: list[float] = []
+    history_val_energy_closure_loss: list[float] = []
 
     for _epoch in range(args.max_epochs):
         model.train()
@@ -2306,6 +2618,27 @@ def train_patch_model(
             sqerr = (pred - yb) ** 2
             weighted_mask = ymask * sample_weight * target_weight
             loss = (sqerr * weighted_mask).sum() / weighted_mask.sum().clamp_min(1.0)
+            if energy_closure_enabled:
+                closure_loss, closure_bias_loss, derivative_loss = _energy_closure_loss_torch(
+                    pred,
+                    yb,
+                    ymask,
+                    xb,
+                    input_names=input_names,
+                    target_names=target_names,
+                    x_mean=x_mean_tensor,
+                    x_std=x_std_tensor,
+                    y_mean=y_mean_tensor,
+                    y_std=y_std_tensor,
+                    heat_scale=closure_heat_scale,
+                    derivative_scale=closure_derivative_scale,
+                )
+                loss = (
+                    loss
+                    + args.energy_closure_weight * closure_loss
+                    + args.energy_closure_bias_weight * closure_bias_loss
+                    + args.energy_derivative_weight * derivative_loss
+                )
             loss.backward()
             optimizer.step()
             batch_loss_acc = batch_loss_acc + loss.detach()
@@ -2321,6 +2654,30 @@ def train_patch_model(
             val_sqerr = (val_pred - y_val_tensor) ** 2
             val_weighted_mask = y_val_mask_tensor * val_weight_tensor.unsqueeze(1) * val_target_weight_tensor
             val_loss = float(((val_sqerr * val_weighted_mask).sum() / val_weighted_mask.sum().clamp_min(1.0)).detach().cpu())
+            val_energy_closure_loss = 0.0
+            if energy_closure_enabled:
+                val_closure, val_closure_bias, val_derivative = _energy_closure_loss_torch(
+                    val_pred,
+                    y_val_tensor,
+                    y_val_mask_tensor,
+                    x_val_tensor,
+                    input_names=input_names,
+                    target_names=target_names,
+                    x_mean=x_mean_tensor,
+                    x_std=x_std_tensor,
+                    y_mean=y_mean_tensor,
+                    y_std=y_std_tensor,
+                    heat_scale=closure_heat_scale,
+                    derivative_scale=closure_derivative_scale,
+                )
+                val_energy_closure_loss = float(
+                    (
+                        args.energy_closure_weight * val_closure
+                        + args.energy_closure_bias_weight * val_closure_bias
+                        + args.energy_derivative_weight * val_derivative
+                    ).detach().cpu()
+                )
+                val_loss += val_energy_closure_loss
             if log_dir is not None and args.log_interval > 0 and (_epoch + 1) % args.log_interval == 0:
                 per_target_mse = (val_sqerr * y_val_mask_tensor).sum(0) / y_val_mask_tensor.sum(0).clamp_min(1.0)
                 log_row = {"epoch": _epoch + 1, "val_loss": val_loss,
@@ -2328,6 +2685,7 @@ def train_patch_model(
                 with (log_dir / "training_log.jsonl").open("a", encoding="utf-8") as _lf:
                     _lf.write(json.dumps(log_row) + "\n")
         history_val_loss.append(val_loss)
+        history_val_energy_closure_loss.append(val_energy_closure_loss)
 
         best_marker = ""
         if val_loss < best_val_loss:
@@ -2487,6 +2845,16 @@ def train_patch_model(
         "log1p_target_names": list(args.log1p_targets),
         "negative_evap_weight": float(args.negative_evap_weight),
         "negative_evap_threshold": float(args.negative_evap_threshold),
+        "qsoil_high_lai_weight": float(args.qsoil_high_lai_weight),
+        "qsoil_high_lai_threshold": float(args.qsoil_high_lai_threshold),
+        "energy_closed_thermal_targets": bool(has_energy_closed_soil_targets(target_names)),
+        "energy_closed_surface_targets": bool(has_energy_closed_surface_targets(target_names)),
+        "energy_closure_loss_enabled": bool(energy_closure_enabled),
+        "energy_closure_weight": float(args.energy_closure_weight),
+        "energy_closure_bias_weight": float(args.energy_closure_bias_weight),
+        "energy_derivative_weight": float(args.energy_derivative_weight),
+        "energy_closure_heat_scale": float(closure_heat_scale),
+        "energy_closure_derivative_scale": float(closure_derivative_scale),
         "pft_embedding_dim": int(args.pft_embedding_dim),
         "pft_embedding_input_name": "pft_type" if pft_embedding_input_index is not None else None,
         "pft_embedding_input_index": pft_embedding_input_index,
@@ -2516,6 +2884,7 @@ def train_patch_model(
         "training_history": {
             "train_loss": history_train_loss,
             "val_loss": history_val_loss,
+            "val_energy_closure_loss": history_val_energy_closure_loss,
             "best_val_loss": best_val_loss,
         },
         "train_range": _sample_range(train_idx),
@@ -2711,6 +3080,16 @@ def write_patch_artifacts(
         "log1p_target_names": results.get("log1p_target_names", list(DEFAULT_LOG1P_TARGET_NAMES)),
         "negative_evap_weight": results.get("negative_evap_weight", 1.0),
         "negative_evap_threshold": results.get("negative_evap_threshold", 0.0),
+        "qsoil_high_lai_weight": results.get("qsoil_high_lai_weight", 1.0),
+        "qsoil_high_lai_threshold": results.get("qsoil_high_lai_threshold", 3.0),
+        "energy_closed_thermal_targets": results.get("energy_closed_thermal_targets", False),
+        "energy_closed_surface_targets": results.get("energy_closed_surface_targets", False),
+        "energy_closure_loss_enabled": results.get("energy_closure_loss_enabled", False),
+        "energy_closure_weight": results.get("energy_closure_weight", 0.0),
+        "energy_closure_bias_weight": results.get("energy_closure_bias_weight", 0.0),
+        "energy_derivative_weight": results.get("energy_derivative_weight", 0.0),
+        "energy_closure_heat_scale": results.get("energy_closure_heat_scale"),
+        "energy_closure_derivative_scale": results.get("energy_closure_derivative_scale"),
         "pft_embedding_dim": results.get("pft_embedding_dim", 0),
         "pft_embedding_input_name": results.get("pft_embedding_input_name"),
         "pft_embedding_input_index": results.get("pft_embedding_input_index"),
@@ -2748,6 +3127,16 @@ def write_patch_artifacts(
         "log1p_target_names": results.get("log1p_target_names", list(DEFAULT_LOG1P_TARGET_NAMES)),
         "negative_evap_weight": results.get("negative_evap_weight", 1.0),
         "negative_evap_threshold": results.get("negative_evap_threshold", 0.0),
+        "qsoil_high_lai_weight": results.get("qsoil_high_lai_weight", 1.0),
+        "qsoil_high_lai_threshold": results.get("qsoil_high_lai_threshold", 3.0),
+        "energy_closed_thermal_targets": results.get("energy_closed_thermal_targets", False),
+        "energy_closed_surface_targets": results.get("energy_closed_surface_targets", False),
+        "energy_closure_loss_enabled": results.get("energy_closure_loss_enabled", False),
+        "energy_closure_weight": results.get("energy_closure_weight", 0.0),
+        "energy_closure_bias_weight": results.get("energy_closure_bias_weight", 0.0),
+        "energy_derivative_weight": results.get("energy_derivative_weight", 0.0),
+        "energy_closure_heat_scale": results.get("energy_closure_heat_scale"),
+        "energy_closure_derivative_scale": results.get("energy_closure_derivative_scale"),
         "surfdata_file": results.get("surfdata_file"),
         "surfdata_cell_stride": results.get("surfdata_cell_stride"),
         "dropped_target_names": results.get("dropped_target_names", []),
